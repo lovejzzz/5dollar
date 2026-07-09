@@ -1,6 +1,9 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { drainLiveJobs } from "../lib/process-live-job";
+import { drainNotifications } from "../lib/process-notification";
+import { getFiveMode, type RuntimeEnv } from "../lib/runtime-env";
 
 interface Env {
   ASSETS: Fetcher;
@@ -41,6 +44,20 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+  scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ) {
+    const runtime = env as unknown as RuntimeEnv;
+    if (getFiveMode(runtime) !== "live") return;
+    ctx.waitUntil(
+      Promise.all([
+        drainLiveJobs(5, { runtime }),
+        drainNotifications(5, { runtime }),
+      ]),
+    );
   },
 };
 

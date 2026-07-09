@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 const root = new URL("../", import.meta.url);
@@ -19,6 +19,8 @@ test("defines the complete FIVE product experience", async () => {
   assert.match(app, /Where should we send it\?/);
   assert.match(app, /SANDBOX PREVIEW/);
   assert.match(app, /No real money is earned or sent/);
+  assert.match(app, /PAYOUT CONFIRMED/);
+  assert.match(app, /funded task inventory/i);
   assert.match(app, /What Five will/);
   assert.match(app, /aria-live/);
   assert.match(css, /@media \(max-width: 620px\)/);
@@ -27,12 +29,21 @@ test("defines the complete FIVE product experience", async () => {
   assert.doesNotMatch(page + layout + app, /codex-preview|Your site is taking shape/i);
 });
 
-test("ships the durable job routes and migration", async () => {
-  const [createRoute, statusRoute, jobs, migration] = await Promise.all([
+test("ships the durable sandbox and live-money routes and migrations", async () => {
+  const migrationNames = (await readdir(new URL("drizzle/", root)))
+    .filter((name) => /^\d+.*\.sql$/.test(name))
+    .sort();
+  const migrations = (
+    await Promise.all(
+      migrationNames.map((name) => readFile(new URL(`drizzle/${name}`, root), "utf8")),
+    )
+  ).join("\n");
+  const [createRoute, statusRoute, jobs, processor, webhook] = await Promise.all([
     readFile(new URL("app/api/jobs/route.ts", root), "utf8"),
     readFile(new URL("app/api/jobs/[id]/route.ts", root), "utf8"),
     readFile(new URL("lib/jobs.ts", root), "utf8"),
-    readFile(new URL("drizzle/0000_square_nocturne.sql", root), "utf8"),
+    readFile(new URL("lib/process-live-job.ts", root), "utf8"),
+    readFile(new URL("app/api/webhooks/paypal/route.ts", root), "utf8"),
   ]);
 
   assert.match(createRoute, /export async function POST/);
@@ -40,7 +51,16 @@ test("ships the durable job routes and migration", async () => {
   assert.match(jobs, /crypto\.subtle\.digest/);
   assert.match(jobs, /maskDestination/);
   assert.match(jobs, /No task or payment was created/);
-  assert.match(migration, /CREATE TABLE `jobs`/);
-  assert.match(migration, /CREATE TABLE `job_events`/);
+  assert.match(migrations, /CREATE TABLE `jobs`/);
+  assert.match(migrations, /CREATE TABLE `job_events`/);
+  assert.match(migrations, /CREATE TABLE `funded_tasks`/);
+  assert.match(migrations, /CREATE TABLE `live_jobs`/);
+  assert.match(migrations, /CREATE TABLE `payouts`/);
+  assert.match(migrations, /CREATE TABLE `funding_receipts`/);
+  assert.match(migrations, /CREATE TABLE `notification_outbox`/);
+  assert.match(migrations, /CREATE TABLE `paypal_webhook_events`/);
+  assert.match(processor, /earned_cents < 500/);
+  assert.match(processor, /createPayPalFiveDollarPayout/);
+  assert.match(webhook, /verifyPayPalWebhookSignature/);
   await assert.rejects(access(new URL("app/_sites-preview/SkeletonPreview.tsx", root)));
 });

@@ -458,6 +458,24 @@ input[type="checkbox"] {
   font-weight: 620;
 }
 
+.sign-in-action {
+  width: fit-content;
+  margin: 9px 2px 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #075f3b;
+  font-size: 12px;
+  font-weight: 720;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.sign-in-action:hover {
+  color: #043e27;
+}
+
 .notification-choice {
   margin: 17px 0 0;
   display: flex;
@@ -523,9 +541,21 @@ input[type="checkbox"] {
   opacity: 0.68;
 }
 
+.primary-button--unavailable:disabled {
+  cursor: not-allowed;
+}
+
 .primary-button span:last-child {
   font-size: 22px;
   font-weight: 480;
+}
+
+.live-inventory-note {
+  margin: 9px 8px 0;
+  color: #66746c;
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: center;
 }
 
 .card-assurance {
@@ -767,6 +797,11 @@ input[type="checkbox"] {
   background: #eef8f2;
 }
 
+.demo-disclosure--live {
+  border-color: #9bc7ad;
+  background: #edf8f1;
+}
+
 .demo-disclosure__label {
   padding: 3px 6px;
   border-radius: 4px;
@@ -784,6 +819,11 @@ input[type="checkbox"] {
   color: #185c3d;
 }
 
+.demo-disclosure--live .demo-disclosure__label {
+  background: #cce8d7;
+  color: #145b3b;
+}
+
 .demo-disclosure p {
   margin: 0;
   color: #6c5520;
@@ -793,6 +833,10 @@ input[type="checkbox"] {
 
 .demo-disclosure--complete p {
   color: #3f6250;
+}
+
+.demo-disclosure--live p {
+  color: #375f4a;
 }
 
 .secondary-button {

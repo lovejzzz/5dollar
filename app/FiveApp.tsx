@@ -29,11 +29,11 @@ type PublicJob = {
   id: string;
   requestCode: string;
   amountCents: 500;
-  mode: "sandbox";
+  mode: "sandbox" | "live";
   payoutMethod: PayoutMethod;
   payoutMethodLabel: string;
   destinationHint: string;
-  status: JobStatus;
+  status: JobStatus | string;
   progress: number;
   headline: string;
   message: string;
@@ -41,6 +41,13 @@ type PublicJob = {
   createdAt: string;
   completedAt: string | null;
   activities: JobActivity[];
+};
+
+type AppConfig = {
+  mode: "loading" | "sandbox" | "live";
+  liveReady: boolean;
+  payoutMethods: PayoutMethod[];
+  availableFundedTasks: number;
 };
 
 const METHOD_OPTIONS: Array<{
@@ -96,10 +103,11 @@ function validateDestination(method: PayoutMethod, value: string) {
   return valid ? "" : "Check that destination and try again.";
 }
 
-function AgentCard() {
+function AgentCard({ config }: { config: AppConfig }) {
   const [method, setMethod] = useState<PayoutMethod>("paypal");
   const [destination, setDestination] = useState("");
   const [error, setError] = useState("");
+  const [signInUrl, setSignInUrl] = useState("");
   const [job, setJob] = useState<PublicJob | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [notifyBrowser, setNotifyBrowser] = useState(false);
@@ -113,9 +121,15 @@ function AgentCard() {
   const focusedJob = useRef<string | null>(null);
   const jobId = job?.id ?? null;
   const jobStatus = job?.status ?? null;
+  const jobMode = job?.mode ?? null;
 
   useEffect(() => {
-    if (!job || job.status === "complete") return;
+    if (
+      !job ||
+      ["complete", "paid", "reversed", "failed", "needs_review"].includes(job.status)
+    ) {
+      return;
+    }
     let cancelled = false;
     const timer = window.setTimeout(async () => {
       try {
@@ -132,7 +146,7 @@ function AgentCard() {
           );
         }
       }
-    }, 1_100);
+    }, job.mode === "live" ? 2_500 : 1_100);
 
     return () => {
       cancelled = true;
@@ -147,18 +161,21 @@ function AgentCard() {
       headingRef.current?.focus();
     }
     if (
-      jobStatus === "complete" &&
+      (jobStatus === "complete" || jobStatus === "paid") &&
       notifiedJob.current !== jobId &&
       notifyBrowser &&
       "Notification" in window &&
       Notification.permission === "granted"
     ) {
       notifiedJob.current = jobId;
-      new Notification("FIVE demo complete", {
-        body: "The preview finished. No real task or payment was created.",
+      new Notification(jobMode === "live" ? "Your $5 has arrived" : "FIVE demo complete", {
+        body:
+          jobMode === "live"
+            ? "PayPal confirmed that your individual $5 payout succeeded."
+            : "The preview finished. No real task or payment was created.",
       });
     }
-  }, [jobId, jobStatus, notifyBrowser]);
+  }, [jobId, jobMode, jobStatus, notifyBrowser]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -170,6 +187,7 @@ function AgentCard() {
 
     setSubmitting(true);
     setError("");
+    setSignInUrl("");
     try {
       if (
         notifyBrowser &&
@@ -183,8 +201,19 @@ function AgentCard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ payoutMethod: method, destination }),
       });
-      const payload = (await response.json()) as { job?: PublicJob; error?: string };
+      const payload = (await response.json()) as {
+        job?: PublicJob;
+        error?: string;
+        signInUrl?: string;
+      };
       if (!response.ok || !payload.job) {
+        setSignInUrl(
+          response.status === 401 &&
+            typeof payload.signInUrl === "string" &&
+            /^\/signin-with-chatgpt(?:\?|$)/.test(payload.signInUrl)
+            ? payload.signInUrl
+            : "",
+        );
         throw new Error(payload.error || "The demo could not be started.");
       }
       notifiedJob.current = null;
@@ -202,18 +231,23 @@ function AgentCard() {
     setJob(null);
     setDestination("");
     setError("");
+    setSignInUrl("");
     notifiedJob.current = null;
     focusedJob.current = null;
   }
 
   if (job) {
-    const complete = job.status === "complete";
+    const complete = job.status === "complete" || job.status === "paid";
+    const live = job.mode === "live";
+    const needsAction = ["needs_action", "needs_review", "reversed", "failed"].includes(
+      job.status,
+    );
     return (
       <section className="request-card request-card--running" aria-labelledby="job-heading">
         <div className="card-status-row">
           <span className={`agent-state ${complete ? "agent-state--done" : ""}`}>
             <span className="agent-state__dot" aria-hidden="true" />
-            {complete ? "DEMO FINISHED" : "AGENT RUNNING"}
+            {complete ? (live ? "PAYOUT CONFIRMED" : "DEMO FINISHED") : needsAction ? "ACTION NEEDED" : "AGENT RUNNING"}
           </span>
           <span className="request-code">{job.requestCode}</span>
         </div>
@@ -228,7 +262,7 @@ function AgentCard() {
         <div className="job-destination">
           <div>
             <span className="job-destination__amount">$5.00</span>
-            <span className="job-destination__label">sandbox reward</span>
+            <span className="job-destination__label">{live ? "live reward" : "sandbox reward"}</span>
           </div>
           <p>
             {job.payoutMethodLabel} <span aria-hidden="true">·</span>{" "}
@@ -239,7 +273,7 @@ function AgentCard() {
         <div
           className="progress-track"
           role="progressbar"
-          aria-label="Demo workflow progress"
+          aria-label={live ? "Live reward workflow progress" : "Demo workflow progress"}
           aria-valuenow={job.progress}
           aria-valuemin={0}
           aria-valuemax={100}
@@ -265,23 +299,42 @@ function AgentCard() {
           ))}
         </ol>
 
-        <div className={`demo-disclosure ${complete ? "demo-disclosure--complete" : ""}`}>
+        <div className={`demo-disclosure ${complete ? "demo-disclosure--complete" : ""} ${live ? "demo-disclosure--live" : ""}`}>
           <span className="demo-disclosure__label">
-            {complete ? "NO FUNDS MOVED" : "DEMO MODE"}
+            {live
+              ? complete
+                ? "PAYPAL CONFIRMED"
+                : needsAction
+                  ? "ACTION NEEDED"
+                  : "LIVE WORKFLOW"
+              : complete
+                ? "NO FUNDS MOVED"
+                : "DEMO MODE"}
           </span>
           <p>
-            {complete
-              ? "This preview stored only a masked destination and simulated the workflow."
-              : "These steps are simulated. No marketplace task or payout is being created."}
+            {live
+              ? complete
+                ? "The individual payout item—not just its batch—was reported successful by PayPal."
+                : "Live rewards use pre-funded tasks. A payout cannot start until accepted revenue covers the full $5."
+              : complete
+                ? "This preview stored only a masked destination and simulated the workflow."
+                : "These steps are simulated. No marketplace task or payout is being created."}
           </p>
         </div>
 
         <button className="secondary-button" type="button" onClick={resetDemo}>
-          {complete ? "Run the demo again" : "Cancel demo"}
+          {complete ? (live ? "Back to the request form" : "Run the demo again") : live ? "Back to the request form" : "Cancel demo"}
         </button>
       </section>
     );
   }
+
+  const liveSetupPaused = config.mode === "live" && !config.liveReady;
+  const noLiveInventory =
+    config.mode === "live" &&
+    config.liveReady &&
+    config.availableFundedTasks <= 0;
+  const liveRequestDisabled = liveSetupPaused || noLiveInventory;
 
   return (
     <section className="request-card" aria-labelledby="request-heading">
@@ -305,11 +358,18 @@ function AgentCard() {
               onChange={(event) => {
                 setMethod(event.target.value as PayoutMethod);
                 setError("");
+                setSignInUrl("");
               }}
             >
-              {METHOD_OPTIONS.map((option) => (
+              {METHOD_OPTIONS.filter(
+                (option) => config.mode !== "live" || option.value === "paypal",
+              ).map((option) => (
                 <option key={option.value} value={option.value}>
-                  {option.label} — {option.availability}
+                  {option.label} —{
+                    config.mode === "live" && option.value === "paypal"
+                      ? " live rail"
+                      : ` ${option.availability}`
+                  }
                 </option>
               ))}
             </select>
@@ -325,6 +385,7 @@ function AgentCard() {
             onChange={(event) => {
               setDestination(event.target.value);
               if (error) setError("");
+              if (signInUrl) setSignInUrl("");
             }}
             onBlur={() => destination && setError(validateDestination(method, destination))}
             placeholder={PLACEHOLDERS[method]}
@@ -334,12 +395,22 @@ function AgentCard() {
             aria-describedby={error ? "destination-error" : "destination-help"}
           />
           {error ? (
-            <p className="field-error" id="destination-error" role="alert">
-              {error}
-            </p>
+            <>
+              <p className="field-error" id="destination-error" role="alert">
+                {error}
+              </p>
+              {signInUrl && (
+                <a className="sign-in-action" href={signInUrl}>
+                  Sign in with ChatGPT to continue
+                  <span aria-hidden="true">→</span>
+                </a>
+              )}
+            </>
           ) : (
             <p className="field-help" id="destination-help">
-              {METHOD_HELP[method]}
+              {config.mode === "live" && method === "paypal"
+                ? "Use the email, phone number, or PayPal ID that should receive the live payout."
+                : METHOD_HELP[method]}
             </p>
           )}
         </div>
@@ -352,16 +423,40 @@ function AgentCard() {
               onChange={(event) => setNotifyBrowser(event.target.checked)}
             />
             <span>
-              Notify me in this browser when the demo finishes
-              <small>You may be asked for notification permission.</small>
+              {config.mode === "live"
+                ? "Notify me in this browser when the $5 arrives"
+                : "Notify me in this browser when the demo finishes"}
+              <small>
+                {config.mode === "live"
+                  ? "A transactional arrival email is sent automatically; browser alerts are optional."
+                  : "You may be asked for notification permission."}
+              </small>
             </span>
           </label>
         )}
 
-        <button className="primary-button" type="submit" disabled={submitting}>
-          <span>{submitting ? "Starting the agent…" : "Get me $5"}</span>
+        <button
+          className={`primary-button ${liveRequestDisabled ? "primary-button--unavailable" : ""}`}
+          type="submit"
+          disabled={submitting || liveRequestDisabled}
+          aria-describedby={noLiveInventory ? "live-inventory-note" : undefined}
+        >
+          <span>
+            {submitting
+              ? "Starting the agent…"
+              : noLiveInventory
+                ? "No funded tasks available"
+                : liveSetupPaused
+                  ? "Live requests paused"
+                  : "Get me $5"}
+          </span>
           <span aria-hidden="true">→</span>
         </button>
+        {noLiveInventory && (
+          <p className="live-inventory-note" id="live-inventory-note" role="status">
+            Live requests reopen when a sponsor-funded task is ready.
+          </p>
+        )}
       </form>
 
       <p className="card-assurance">
@@ -373,12 +468,68 @@ function AgentCard() {
 }
 
 export function FiveApp() {
+  const [config, setConfig] = useState<AppConfig>({
+    mode: "loading",
+    liveReady: false,
+    payoutMethods: [],
+    availableFundedTasks: 0,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/config", { cache: "no-store" })
+      .then(async (response) => {
+        const payload = (await response.json()) as Partial<AppConfig>;
+        if (!cancelled) {
+          setConfig({
+            mode: payload.mode === "live" ? "live" : "sandbox",
+            liveReady: payload.liveReady === true,
+            payoutMethods: Array.isArray(payload.payoutMethods)
+              ? payload.payoutMethods
+              : ["paypal"],
+            availableFundedTasks:
+              typeof payload.availableFundedTasks === "number"
+                ? payload.availableFundedTasks
+                : 0,
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setConfig({
+            mode: "sandbox",
+            liveReady: false,
+            payoutMethods: ["paypal", "zelle", "cashapp", "venmo", "other"],
+            availableFundedTasks: 0,
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const live = config.mode === "live";
   return (
     <>
       <div className="sandbox-strip" role="note">
-        <strong>SANDBOX PREVIEW</strong>
+        <strong>
+          {config.mode === "loading"
+            ? "CHECKING STATUS"
+            : live
+              ? config.liveReady
+                ? "LIVE BETA"
+                : "LIVE SETUP PAUSED"
+              : "SANDBOX PREVIEW"}
+        </strong>
         <span aria-hidden="true">·</span>
-        This demo simulates the workflow. No real money is earned or sent.
+        {config.mode === "loading"
+          ? "Confirming whether this deployment is sandbox or live."
+          : live
+            ? config.liveReady
+              ? `${config.availableFundedTasks} funded task${config.availableFundedTasks === 1 ? "" : "s"} currently available. Payment is confirmed only after provider success.`
+              : "Live requests are disabled until every earning and payout secret is configured."
+            : "This demo simulates the workflow. No real money is earned or sent."}
       </div>
 
       <header className="site-header">
@@ -390,7 +541,7 @@ export function FiveApp() {
           <a href="#how-it-works">How it works</a>
           <a href="#safety">Safety</a>
         </nav>
-        <span className="demo-pill"><span aria-hidden="true" /> DEMO MODE</span>
+        <span className="demo-pill"><span aria-hidden="true" /> {live ? "LIVE BETA" : "DEMO MODE"}</span>
       </header>
 
       <main id="top">
@@ -411,11 +562,13 @@ export function FiveApp() {
               <span><i aria-hidden="true" />Every step visible</span>
             </div>
             <p className="hero-qualifier">
-              Prototype experience. Live earning and payout providers are not connected yet.
+              {live
+                ? "Live rewards depend on funded task inventory and verified PayPal item status."
+                : "Prototype experience. Live earning and payout providers are not connected yet."}
             </p>
             <div className="five-watermark" aria-hidden="true">$5</div>
           </div>
-          <AgentCard />
+          <AgentCard config={config} />
         </section>
 
         <section className="how-section" id="how-it-works" aria-labelledby="how-heading">
@@ -461,10 +614,13 @@ export function FiveApp() {
             </ul>
           </div>
 
-          <aside className="receipt" aria-label="Simulated agent receipt">
+          <aside
+            className="receipt"
+            aria-label={live ? "Live payout contract" : "Simulated agent receipt"}
+          >
             <div className="receipt__top">
               <span>AGENT RECEIPT</span>
-              <span className="receipt__stamp">SIMULATED</span>
+              <span className="receipt__stamp">{live ? "LIVE CONTRACT" : "SIMULATED"}</span>
             </div>
             <div className="receipt__amount"><span>$</span>5.00</div>
             <dl>
@@ -474,8 +630,8 @@ export function FiveApp() {
               <div><dt>Payout</dt><dd>Provider receipt required</dd></div>
             </dl>
             <div className="receipt__footer">
-              <span>FIVE / DEMO</span>
-              <span>NOT A PAYMENT</span>
+              <span>{live ? "FIVE / LIVE BETA" : "FIVE / DEMO"}</span>
+              <span>{live ? "PROVIDER PROOF REQUIRED" : "NOT A PAYMENT"}</span>
             </div>
           </aside>
         </section>
@@ -489,8 +645,9 @@ export function FiveApp() {
             <details open>
               <summary>Where does the $5 come from?</summary>
               <p>
-                In a live version, sponsors pre-fund approved tasks. The agent completes one,
-                quality-checks it, and shares $5 only after that revenue is accepted and settled.
+                {live
+                  ? "Sponsors fund approved tasks through verified PayPal captures. The agent completes one and releases $5 only after its evidence contract accepts the work."
+                  : "In a live version, sponsors pre-fund approved tasks. The agent completes one, quality-checks it, and shares $5 only after that revenue is accepted and settled."}
               </p>
             </details>
             <details>
@@ -501,10 +658,11 @@ export function FiveApp() {
               </p>
             </details>
             <details>
-              <summary>What data does the demo store?</summary>
+              <summary>What data does Five store?</summary>
               <p>
-                The demo saves a one-way hash and a masked hint—not the raw destination—plus the
-                workflow status needed to keep the activity log consistent.
+                {live
+                  ? "Live requests store the authenticated owner email, an encrypted payout destination, a keyed fingerprint, a masked hint, workflow/provider receipts, and notification delivery state. The raw destination is never returned to the browser."
+                  : "The demo saves a one-way hash and a masked hint—not the raw destination—plus the workflow status needed to keep the activity log consistent."}
               </p>
             </details>
           </div>

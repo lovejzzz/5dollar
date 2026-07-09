@@ -130,7 +130,7 @@ function database(): D1Database {
 async function ensureDatabase(db: D1Database) {
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS jobs (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL,
       payout_method TEXT NOT NULL,
       destination_hash TEXT NOT NULL,
       destination_hint TEXT NOT NULL,
