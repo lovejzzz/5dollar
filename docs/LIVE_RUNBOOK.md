@@ -58,9 +58,15 @@ For PayPal:
 7. Record the webhook ID.
 
 For arrival email, verify a sending domain with Resend and choose the exact
-`NOTIFICATION_FROM_EMAIL` value for transactional messages. Configure a
-monitored `SUPPORT_EMAIL` mailbox for charged sponsor payments that enter
-manual review; live mode rejects an invalid or missing support address.
+`NOTIFICATION_FROM_EMAIL` value for transactional messages. Register
+`https://<site-host>/api/webhooks/resend`, subscribe to `email.delivered`,
+`email.delivery_delayed`, `email.bounced`, `email.failed`, and
+`email.suppressed`, and record the endpoint signing secret as
+`RESEND_WEBHOOK_SECRET`. The handler verifies the raw Svix signature, stores no
+recipient address from the webhook, requires the category tag attached by FIVE,
+and deduplicates the provider's at-least-once events. Configure a monitored
+`SUPPORT_EMAIL` mailbox for charged sponsor payments that enter manual review;
+live mode rejects an invalid or missing support address.
 
 FIVE never treats a batch-level success as proof that a recipient was paid.
 
@@ -89,6 +95,7 @@ PAYPAL_CLIENT_ID
 PAYPAL_CLIENT_SECRET
 PAYPAL_WEBHOOK_ID
 RESEND_API_KEY
+RESEND_WEBHOOK_SECRET
 NOTIFICATION_FROM_EMAIL=Five <payouts@your-verified-domain.example>
 SUPPORT_EMAIL=support@your-domain.example
 SPONSOR_ALLOWED_EMAILS=approved-sponsor@your-domain.example
@@ -211,8 +218,9 @@ one-owner and one-destination constraints are a backstop, not identity proof.
   the job.
 - Send a later `RETURNED` or `REFUNDED` event and confirm it becomes `reversed`.
 - Test `UNCLAIMED`, `FAILED`, provider timeout, and expired-lease recovery paths.
-- Confirm the Resend arrival email is delivered once and its outbox row is
-  marked `sent`; PayPal's own notification is supplemental.
+- Confirm the Resend arrival email is delivered once, its outbox row is marked
+  `sent`, `delivery_status` is `delivered`, and `delivered_at` is populated;
+  PayPal's own notification is supplemental.
 - Run the canary certificate and require every gate to be `true`:
 
   ```bash
@@ -220,9 +228,10 @@ one-owner and one-destination constraints are a backstop, not identity proof.
     https://<site-host> <live-job-uuid> --wait=300
   ```
 
-  A passing `five-live-canary-v1` certificate proves the exact reward, settled
-  sponsor capture, accepted AI work, individual PayPal item success, notification
-  provider acceptance of the arrival email, and absence of a terminal funding
-  event. It contains no owner, destination, or provider transaction identifiers.
+  A passing `five-live-canary-v2` certificate proves the exact reward, settled
+  sponsor capture, accepted AI work, individual PayPal item success, recipient
+  mail-server acceptance of the arrival email, and absence of terminal funding
+  or notification-delivery events. It contains no owner, destination, or
+  provider transaction identifiers.
 - Review logs to ensure they contain no raw payout destination or provider
   secret.

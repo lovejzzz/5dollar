@@ -4,6 +4,7 @@ import { liveCanaryCertificate } from "../lib/live-canary";
 import {
   applyPayPalPayoutObservation,
   applyPayPalWebhook,
+  applyResendDeliveryEvent,
   claimLiveJob,
   createLiveJob,
   getOrCreatePayout,
@@ -35,6 +36,7 @@ function liveRuntime(database: FakeD1Database): RuntimeEnv {
     PAYPAL_CLIENT_SECRET: "paypal-secret",
     PAYPAL_WEBHOOK_ID: "webhook-id",
     RESEND_API_KEY: "resend-key",
+    RESEND_WEBHOOK_SECRET: "whsec-resend-webhook-secret",
     NOTIFICATION_FROM_EMAIL: "Five <payouts@example.com>",
     SUPPORT_EMAIL: "support@example.com",
   };
@@ -166,6 +168,18 @@ test("a canary certificate proves the complete real-money contract without priva
       }),
       "paid",
     );
+    const earlyDelivery = await applyResendDeliveryEvent(
+      {
+        eventId: "msg_canary_delivery_001",
+        eventType: "email.delivered",
+        deliveryStatus: "delivered",
+        notificationKind: "payout_arrived",
+        providerMessageId: "email-canary-001",
+        providerEventTime: Date.parse("2026-07-10T12:05:00.000Z"),
+      },
+      runtime,
+    );
+    assert.equal(earlyDelivery.pendingNotification, true);
     assert.equal(
       (
         await processNotification({
@@ -191,7 +205,7 @@ test("a canary certificate proves the complete real-money contract without priva
       task: "accepted",
       job: "paid",
       payout: "SUCCEEDED",
-      notification: "sent",
+      notification: "delivered",
     });
     const serialized = JSON.stringify(certificate);
     for (const privateValue of [
@@ -202,9 +216,35 @@ test("a canary certificate proves the complete real-money contract without priva
       "PBATCH-CANARY-001",
       "PITEM-CANARY-001",
       "email-canary-001",
+      "msg_canary_delivery_001",
     ]) {
       assert.ok(!serialized.includes(privateValue));
     }
+
+    assert.equal(
+      (
+        await applyResendDeliveryEvent(
+          {
+            eventId: "msg_canary_bounce_001",
+            eventType: "email.bounced",
+            deliveryStatus: "bounced",
+            notificationKind: "payout_arrived",
+            providerMessageId: "email-canary-001",
+            providerEventTime: Date.parse("2026-07-10T12:06:00.000Z"),
+          },
+          runtime,
+        )
+      ).pendingNotification,
+      false,
+    );
+    const deliveryInvalidated = await liveCanaryCertificate(createdJob.id, runtime);
+    assert.ok(deliveryInvalidated);
+    assert.equal(deliveryInvalidated.passed, false);
+    assert.equal(
+      deliveryInvalidated.gates.arrivalNotificationDelivered,
+      false,
+    );
+    assert.equal(deliveryInvalidated.gates.noFundingReversal, true);
 
     await applyPayPalWebhook(
       JSON.stringify({

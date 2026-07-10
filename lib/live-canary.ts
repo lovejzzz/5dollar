@@ -32,11 +32,14 @@ type CanaryRow = {
   notification_status: string | null;
   notification_message_id: string | null;
   notification_sent_at: number | null;
+  notification_delivery_status: string | null;
+  notification_delivered_at: number | null;
   terminal_funding_events: number;
+  terminal_notification_events: number;
 };
 
 export type LiveCanaryCertificate = {
-  proofVersion: "five-live-canary-v1";
+  proofVersion: "five-live-canary-v2";
   jobId: string;
   checkedAt: string;
   passed: boolean;
@@ -45,7 +48,7 @@ export type LiveCanaryCertificate = {
     sponsorCaptureSettled: boolean;
     aiWorkAccepted: boolean;
     individualPayoutSucceeded: boolean;
-    arrivalNotificationSent: boolean;
+    arrivalNotificationDelivered: boolean;
     noFundingReversal: boolean;
   };
   state: {
@@ -89,9 +92,16 @@ export async function liveCanaryCertificate(
               no.status AS notification_status,
               no.provider_message_id AS notification_message_id,
               no.sent_at AS notification_sent_at,
+              no.delivery_status AS notification_delivery_status,
+              no.delivered_at AS notification_delivered_at,
               (SELECT COUNT(*) FROM paypal_funding_webhook_events pfwe
                WHERE pfwe.capture_id = fr.provider_transaction_id)
-                AS terminal_funding_events
+                AS terminal_funding_events,
+              (SELECT COUNT(*) FROM resend_webhook_events rwe
+               WHERE rwe.provider_message_id = no.provider_message_id
+                 AND rwe.event_type IN
+                   ('email.bounced', 'email.failed', 'email.suppressed'))
+                AS terminal_notification_events
        FROM live_jobs lj
        LEFT JOIN funded_tasks ft ON ft.id = lj.task_id
        LEFT JOIN funding_receipts fr ON fr.id = ft.funding_receipt_id
@@ -132,22 +142,25 @@ export async function liveCanaryCertificate(
     Boolean(row.provider_batch_id) &&
     Boolean(row.provider_item_id) &&
     row.job_completed_at !== null;
-  const arrivalNotificationSent =
+  const arrivalNotificationDelivered =
     row.notification_status === "sent" &&
     Boolean(row.notification_message_id) &&
-    row.notification_sent_at !== null;
+    row.notification_sent_at !== null &&
+    row.notification_delivery_status === "delivered" &&
+    row.notification_delivered_at !== null &&
+    row.terminal_notification_events === 0;
   const noFundingReversal = row.terminal_funding_events === 0;
   const gates = {
     exactReward,
     sponsorCaptureSettled,
     aiWorkAccepted,
     individualPayoutSucceeded,
-    arrivalNotificationSent,
+    arrivalNotificationDelivered,
     noFundingReversal,
   };
 
   return {
-    proofVersion: "five-live-canary-v1",
+    proofVersion: "five-live-canary-v2",
     jobId: row.job_id,
     checkedAt: new Date().toISOString(),
     passed: Object.values(gates).every(Boolean),
@@ -158,8 +171,13 @@ export async function liveCanaryCertificate(
       task: row.task_status,
       job: row.job_status,
       payout: row.payout_status,
-      notification: row.notification_status,
+      notification:
+        row.notification_delivery_status ?? row.notification_status,
     },
-    completedAt: isoTime(row.notification_sent_at ?? row.job_completed_at),
+    completedAt: isoTime(
+      row.notification_delivered_at ??
+        row.notification_sent_at ??
+        row.job_completed_at,
+    ),
   };
 }

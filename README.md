@@ -62,7 +62,8 @@ rejection, and D1 state-machine exercises for replay, lease fencing, stale
 webhooks, reversals, one-time task funding, and one-time notification creation.
 
 After a production canary runs, verify its complete sponsor → AI → individual
-payout → arrival-email proof without exposing claimant or provider identifiers:
+payout → mail-server-delivered arrival-email proof without exposing claimant or
+provider identifiers:
 
 ```bash
 PROCESSOR_SECRET=<hosted-secret> npm run verify:live-canary -- \

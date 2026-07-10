@@ -55,6 +55,8 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
     canaryRoute,
     canaryProof,
     canaryScript,
+    resendWebhook,
+    resendProof,
   ] = await Promise.all([
     readFile(new URL("app/api/jobs/route.ts", root), "utf8"),
     readFile(new URL("app/api/jobs/[id]/route.ts", root), "utf8"),
@@ -68,6 +70,8 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
     readFile(new URL("app/api/internal/canary/[id]/route.ts", root), "utf8"),
     readFile(new URL("lib/live-canary.ts", root), "utf8"),
     readFile(new URL("scripts/verify-live-canary.mjs", root), "utf8"),
+    readFile(new URL("app/api/webhooks/resend/route.ts", root), "utf8"),
+    readFile(new URL("lib/resend-webhooks.ts", root), "utf8"),
   ]);
 
   assert.match(createRoute, /export async function POST/);
@@ -84,6 +88,7 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
   assert.match(migrations, /CREATE TABLE `notification_outbox`/);
   assert.match(migrations, /CREATE TABLE `paypal_webhook_events`/);
   assert.match(migrations, /CREATE TABLE `paypal_funding_webhook_events`/);
+  assert.match(migrations, /CREATE TABLE `resend_webhook_events`/);
   assert.match(migrations, /CREATE TABLE `sponsor_task_orders`/);
   assert.match(processor, /earned_cents < 500/);
   assert.match(processor, /createPayPalFiveDollarPayout/);
@@ -98,8 +103,13 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
   assert.match(canaryRoute, /constantTimeSecretEqual/);
   assert.match(canaryRoute, /private, no-store/);
   assert.match(canaryProof, /individualPayoutSucceeded/);
-  assert.match(canaryProof, /arrivalNotificationSent/);
+  assert.match(canaryProof, /arrivalNotificationDelivered/);
   assert.match(canaryProof, /noFundingReversal/);
   assert.match(canaryScript, /PROCESSOR_SECRET/);
+  assert.match(resendWebhook, /verifyResendWebhook/);
+  assert.match(resendWebhook, /applyResendDeliveryEvent/);
+  assert.match(resendWebhook, /request\.text\(\)/);
+  assert.match(resendProof, /new Webhook\(secret\)\.verify/);
+  assert.match(resendProof, /svix-id/);
   await assert.rejects(access(new URL("app/_sites-preview/SkeletonPreview.tsx", root)));
 });

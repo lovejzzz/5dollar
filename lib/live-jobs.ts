@@ -7,6 +7,13 @@ import {
 import { validateFundedTaskSpec, type ValidatedFundedTask } from "./funded-tasks";
 import { parsePayPalFundingTerminalWebhook } from "./paypal-webhooks";
 import type { PayPalFundingCapture, PayPalPayoutBatchObservation } from "./payouts/paypal";
+import {
+  isTerminalResendDeliveryStatus,
+  resendDeliveryStatusForEventType,
+  type ResendNotificationKind,
+  type ResendDeliveryStatus,
+  type VerifiedResendDeliveryEvent,
+} from "./resend-webhooks";
 import { getRuntimeEnv, type RuntimeEnv } from "./runtime-env";
 
 export type LiveJobStatus =
@@ -116,6 +123,8 @@ export type NotificationOutboxRow = {
   lease_token: string | null;
   lease_expires_at: number | null;
   provider_message_id: string | null;
+  delivery_status: ResendDeliveryStatus | null;
+  delivered_at: number | null;
   last_error: string | null;
   created_at: number;
   updated_at: number;
@@ -357,6 +366,8 @@ export async function ensureLiveDatabase(runtime: RuntimeEnv = getRuntimeEnv()) 
       lease_token TEXT,
       lease_expires_at INTEGER,
       provider_message_id TEXT,
+      delivery_status TEXT,
+      delivered_at INTEGER,
       last_error TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -366,7 +377,26 @@ export async function ensureLiveDatabase(runtime: RuntimeEnv = getRuntimeEnv()) 
       "CREATE UNIQUE INDEX IF NOT EXISTS notification_outbox_event_key_idx ON notification_outbox (event_key)",
     ),
     db.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS notification_outbox_provider_message_idx ON notification_outbox (provider_message_id)",
+    ),
+    db.prepare(
       "CREATE INDEX IF NOT EXISTS notification_outbox_delivery_idx ON notification_outbox (status, next_attempt_at, lease_expires_at)",
+    ),
+    db.prepare(`CREATE TABLE IF NOT EXISTS resend_webhook_events (
+      event_id TEXT PRIMARY KEY NOT NULL,
+      event_type TEXT NOT NULL,
+      notification_kind TEXT NOT NULL,
+      notification_id TEXT,
+      provider_message_id TEXT NOT NULL,
+      provider_event_time INTEGER NOT NULL,
+      received_at INTEGER NOT NULL,
+      applied_at INTEGER
+    )`),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS resend_webhook_events_message_idx ON resend_webhook_events (provider_message_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS resend_webhook_events_notification_idx ON resend_webhook_events (notification_id)",
     ),
     db.prepare(`CREATE TABLE IF NOT EXISTS sponsor_order_request_limits (
       owner_email TEXT PRIMARY KEY NOT NULL,
@@ -2184,6 +2214,282 @@ export async function applyPayPalWebhook(
   return applyPayPalPayoutWebhook(rawEvent, runtime);
 }
 
+type ResendWebhookEventRow = {
+  event_type: string;
+  notification_kind: ResendNotificationKind;
+  notification_id: string | null;
+  provider_message_id: string;
+  provider_event_time: number;
+  applied_at: number | null;
+};
+
+type NotificationDeliveryRow = {
+  id: string;
+  job_id: string;
+  kind: "payout_arrived" | "payout_reversed";
+  delivery_status: ResendDeliveryStatus | null;
+};
+
+async function applyResendEventToNotification(
+  db: D1Database,
+  event: VerifiedResendDeliveryEvent,
+  notification: NotificationDeliveryRow,
+) {
+  if (event.notificationKind !== notification.kind) {
+    throw new Error("Resend webhook notification kind conflicts with the outbox.");
+  }
+  const now = Date.now();
+  const terminal = isTerminalResendDeliveryStatus(event.deliveryStatus);
+  const noticeName =
+    notification.kind === "payout_reversed" ? "Reversal notice" : "Arrival notice";
+  const title = terminal
+    ? `${noticeName} delivery failed`
+    : event.deliveryStatus === "delivered"
+      ? `${noticeName} delivered`
+      : `${noticeName} delayed`;
+  const detail = terminal
+    ? "The notification provider reported that the transactional email could not reach the recipient mail server."
+    : event.deliveryStatus === "delivered"
+      ? "The recipient mail server accepted the transactional payout notification."
+      : "The notification provider reported a temporary delay reaching the recipient mail server.";
+  const deliveryUpdate = terminal
+    ? db
+        .prepare(
+          `UPDATE notification_outbox
+           SET delivery_status = ?, updated_at = ?
+           WHERE id = ? AND status = 'sent' AND provider_message_id = ?`,
+        )
+        .bind(
+          event.deliveryStatus,
+          now,
+          notification.id,
+          event.providerMessageId,
+        )
+    : event.deliveryStatus === "delivered"
+      ? db
+          .prepare(
+            `UPDATE notification_outbox
+             SET delivery_status = 'delivered', delivered_at = COALESCE(delivered_at, ?),
+                 updated_at = ?
+             WHERE id = ? AND status = 'sent' AND provider_message_id = ?
+               AND (delivery_status IS NULL OR delivery_status = 'delayed'
+                    OR delivery_status = 'delivered')`,
+          )
+          .bind(
+            event.providerEventTime,
+            now,
+            notification.id,
+            event.providerMessageId,
+          )
+      : db
+          .prepare(
+            `UPDATE notification_outbox
+             SET delivery_status = 'delayed', updated_at = ?
+             WHERE id = ? AND status = 'sent' AND provider_message_id = ?
+               AND delivery_status IS NULL`,
+          )
+          .bind(now, notification.id, event.providerMessageId);
+
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE resend_webhook_events
+         SET notification_id = COALESCE(notification_id, ?)
+         WHERE event_id = ? AND provider_message_id = ?
+           AND (notification_id IS NULL OR notification_id = ?)`,
+      )
+      .bind(
+        notification.id,
+        event.eventId,
+        event.providerMessageId,
+        notification.id,
+      ),
+    deliveryUpdate,
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO live_job_events
+         (event_key, job_id, kind, title, detail, created_at)
+         SELECT ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM resend_webhook_events
+           WHERE event_id = ? AND provider_message_id = ?
+             AND (notification_id IS NULL OR notification_id = ?)
+         )`,
+      )
+      .bind(
+        `job:${notification.job_id}:resend:${event.eventId}`,
+        notification.job_id,
+        terminal
+          ? "notification_delivery_failed"
+          : event.deliveryStatus === "delivered"
+            ? "notification_delivered"
+            : "notification_delayed",
+        title,
+        detail,
+        now,
+        event.eventId,
+        event.providerMessageId,
+        notification.id,
+      ),
+    db
+      .prepare(
+        `UPDATE resend_webhook_events SET applied_at = ?
+         WHERE event_id = ? AND provider_message_id = ?
+           AND notification_id = ? AND applied_at IS NULL`,
+      )
+      .bind(
+        now,
+        event.eventId,
+        event.providerMessageId,
+        notification.id,
+      ),
+  ]);
+}
+
+/** Records one authenticated Resend delivery event without retaining its PII. */
+export async function applyResendDeliveryEvent(
+  event: VerifiedResendDeliveryEvent,
+  runtime: RuntimeEnv = getRuntimeEnv(),
+) {
+  const db = await ensureLiveDatabase(runtime);
+  const existing = await db
+    .prepare(
+      `SELECT event_type, notification_kind, notification_id, provider_message_id,
+              provider_event_time, applied_at
+       FROM resend_webhook_events WHERE event_id = ? LIMIT 1`,
+    )
+    .bind(event.eventId)
+    .first<ResendWebhookEventRow>();
+  if (
+    existing &&
+    (existing.event_type !== event.eventType ||
+      existing.notification_kind !== event.notificationKind ||
+      existing.provider_message_id !== event.providerMessageId ||
+      existing.provider_event_time !== event.providerEventTime)
+  ) {
+    throw new Error("Resend webhook event conflicts with the durable ledger.");
+  }
+
+  const now = Date.now();
+  const inserted = await db
+    .prepare(
+      `INSERT OR IGNORE INTO resend_webhook_events
+       (event_id, event_type, notification_kind, notification_id, provider_message_id,
+        provider_event_time, received_at)
+       VALUES (?, ?, ?, NULL, ?, ?, ?)`,
+    )
+    .bind(
+      event.eventId,
+      event.eventType,
+      event.notificationKind,
+      event.providerMessageId,
+      event.providerEventTime,
+      now,
+    )
+    .run();
+  const durable = await db
+    .prepare(
+      `SELECT event_type, notification_kind, notification_id, provider_message_id,
+              provider_event_time, applied_at
+       FROM resend_webhook_events WHERE event_id = ? LIMIT 1`,
+    )
+    .bind(event.eventId)
+    .first<ResendWebhookEventRow>();
+  if (
+    !durable ||
+    durable.event_type !== event.eventType ||
+    durable.notification_kind !== event.notificationKind ||
+    durable.provider_message_id !== event.providerMessageId ||
+    durable.provider_event_time !== event.providerEventTime
+  ) {
+    throw new Error("Resend webhook event conflicts with the durable ledger.");
+  }
+  if (durable.applied_at !== null) {
+    return {
+      handled: true as const,
+      duplicate: true,
+      deliveryStatus: event.deliveryStatus,
+    };
+  }
+
+  const notification = await db
+    .prepare(
+      `SELECT id, job_id, kind, delivery_status
+       FROM notification_outbox
+       WHERE provider_message_id = ? AND status = 'sent' LIMIT 1`,
+    )
+    .bind(event.providerMessageId)
+    .first<NotificationDeliveryRow>();
+  if (!notification) {
+    return {
+      handled: true as const,
+      duplicate: (inserted.meta.changes ?? 0) === 0,
+      pendingNotification: true as const,
+      deliveryStatus: event.deliveryStatus,
+    };
+  }
+  if (durable.notification_id && durable.notification_id !== notification.id) {
+    throw new Error("Resend webhook event conflicts with the durable ledger.");
+  }
+
+  await applyResendEventToNotification(db, event, notification);
+  return {
+    handled: true as const,
+    duplicate: (inserted.meta.changes ?? 0) === 0,
+    pendingNotification: false as const,
+    deliveryStatus: event.deliveryStatus,
+  };
+}
+
+async function reconcilePendingResendEvents(
+  db: D1Database,
+  providerMessageId: string,
+) {
+  const notification = await db
+    .prepare(
+      `SELECT id, job_id, kind, delivery_status
+       FROM notification_outbox
+       WHERE provider_message_id = ? AND status = 'sent' LIMIT 1`,
+    )
+    .bind(providerMessageId)
+    .first<NotificationDeliveryRow>();
+  if (!notification) return;
+  const events = await db
+    .prepare(
+      `SELECT event_id, event_type, notification_kind, provider_message_id,
+              provider_event_time
+       FROM resend_webhook_events
+       WHERE provider_message_id = ? AND applied_at IS NULL
+       ORDER BY provider_event_time, event_id`,
+    )
+    .bind(providerMessageId)
+    .all<{
+      event_id: string;
+      event_type: string;
+      notification_kind: ResendNotificationKind;
+      provider_message_id: string;
+      provider_event_time: number;
+    }>();
+  for (const row of events.results) {
+    const deliveryStatus = resendDeliveryStatusForEventType(row.event_type);
+    if (!deliveryStatus) {
+      throw new Error("Resend webhook ledger contains an unsupported event.");
+    }
+    await applyResendEventToNotification(
+      db,
+      {
+        eventId: row.event_id,
+        eventType: row.event_type as VerifiedResendDeliveryEvent["eventType"],
+        deliveryStatus,
+        notificationKind: row.notification_kind,
+        providerMessageId: row.provider_message_id,
+        providerEventTime: row.provider_event_time,
+      },
+      notification,
+    );
+  }
+}
+
 export async function claimNotification(
   runtime: RuntimeEnv = getRuntimeEnv(),
 ) {
@@ -2292,6 +2598,7 @@ export async function markNotificationSent(input: {
         input.providerMessageId,
       ),
   ]);
+  await reconcilePendingResendEvents(db, input.providerMessageId);
 }
 
 export async function markNotificationRetry(input: {

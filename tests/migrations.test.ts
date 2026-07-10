@@ -15,6 +15,7 @@ test("checked-in migrations produce the final constrained live schema", () => {
       "0000",
       "0001",
       "0002",
+      "0003",
     ]);
     for (const migration of migrations) {
       database.exec(readFileSync(`${directory}/${migration}`, "utf8"));
@@ -37,6 +38,12 @@ test("checked-in migrations produce the final constrained live schema", () => {
       .all() as Array<{ name: string; notnull: number; pk: number }>;
     const sponsorRequestLimitColumns = database
       .prepare("PRAGMA table_info(sponsor_order_request_limits)")
+      .all() as Array<{ name: string; notnull: number; pk: number }>;
+    const notificationColumns = database
+      .prepare("PRAGMA table_info(notification_outbox)")
+      .all() as Array<{ name: string; notnull: number; pk: number }>;
+    const resendWebhookColumns = database
+      .prepare("PRAGMA table_info(resend_webhook_events)")
       .all() as Array<{ name: string; notnull: number; pk: number }>;
     assert.equal(
       fundedTaskColumns.find((column) => column.name === "funding_receipt_id")?.notnull,
@@ -118,6 +125,34 @@ test("checked-in migrations produce the final constrained live schema", () => {
         ?.pk,
       1,
     );
+    assert.equal(
+      notificationColumns.find((column) => column.name === "delivery_status")
+        ?.notnull,
+      0,
+    );
+    assert.equal(
+      notificationColumns.find((column) => column.name === "delivered_at")
+        ?.notnull,
+      0,
+    );
+    for (const required of [
+      "event_id",
+      "event_type",
+      "notification_kind",
+      "provider_message_id",
+      "provider_event_time",
+      "received_at",
+    ]) {
+      assert.equal(
+        resendWebhookColumns.find((column) => column.name === required)?.notnull,
+        1,
+        `resend_webhook_events.${required} must be NOT NULL`,
+      );
+    }
+    assert.equal(
+      resendWebhookColumns.find((column) => column.name === "event_id")?.pk,
+      1,
+    );
 
     const sponsorForeignKeys = database
       .prepare("PRAGMA foreign_key_list(sponsor_task_orders)")
@@ -193,6 +228,21 @@ test("checked-in migrations produce the final constrained live schema", () => {
       .map((row) => (row as { name: string }).name);
     assert.ok(fundingWebhookIndexes.includes("paypal_funding_webhook_events_capture_idx"));
     assert.ok(fundingWebhookIndexes.includes("paypal_funding_webhook_events_receipt_idx"));
+    const notificationIndexes = database
+      .prepare("PRAGMA index_list(notification_outbox)")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    assert.ok(
+      notificationIndexes.includes("notification_outbox_provider_message_idx"),
+    );
+    const resendWebhookIndexes = database
+      .prepare("PRAGMA index_list(resend_webhook_events)")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    assert.ok(resendWebhookIndexes.includes("resend_webhook_events_message_idx"));
+    assert.ok(
+      resendWebhookIndexes.includes("resend_webhook_events_notification_idx"),
+    );
 
     const tables = database
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -206,6 +256,7 @@ test("checked-in migrations produce the final constrained live schema", () => {
       "paypal_webhook_events",
       "paypal_funding_webhook_events",
       "notification_outbox",
+      "resend_webhook_events",
       "sponsor_order_request_limits",
       "sponsor_task_orders",
     ]) {

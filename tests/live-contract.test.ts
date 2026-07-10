@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Webhook } from "svix";
 import { runOpenAISponsorTask } from "../lib/earnings/openai";
 import { validateFundedTaskSpec } from "../lib/funded-tasks";
 import {
@@ -16,6 +17,7 @@ import {
 } from "../lib/payouts/paypal";
 import { sendPayoutArrivalNotification } from "../lib/notifications/resend";
 import { parsePayPalFundingTerminalWebhook } from "../lib/paypal-webhooks";
+import { verifyResendWebhook } from "../lib/resend-webhooks";
 
 test("accepts only genuinely funded, automation-approved sponsor tasks", () => {
   const task = validateFundedTaskSpec({
@@ -649,5 +651,70 @@ test("arrival email is transactional and idempotent", async () => {
   assert.equal(result.messageId, "email-001");
   assert.equal(idempotencyKey, "job:123:payout-arrived");
   assert.deepEqual(requestBody?.to, ["owner@example.com"]);
+  assert.deepEqual(requestBody?.tags, [
+    { name: "category", value: "payout_arrived" },
+  ]);
   assert.match(String(requestBody?.subject), /\$5 has arrived/);
+});
+
+test("Resend delivery webhooks are raw-body verified and privacy minimized", () => {
+  const secret = "whsec_dGVzdC1yZXNlbmQtd2ViaG9vay1rZXk=";
+  const eventId = "msg_resend_delivery_001";
+  const now = new Date();
+  const rawPayload = JSON.stringify({
+    type: "email.delivered",
+    created_at: now.toISOString(),
+    data: {
+      email_id: "email-provider-001",
+      to: ["private-claimant@example.com"],
+      subject: "Your $5 has arrived",
+      tags: { category: "payout_arrived" },
+    },
+  });
+  const signature = new Webhook(secret).sign(eventId, now, rawPayload);
+  const verified = verifyResendWebhook({
+    rawPayload,
+    secret,
+    eventId,
+    timestamp: String(Math.floor(now.getTime() / 1_000)),
+    signature,
+  });
+  assert.deepEqual(verified, {
+    eventId,
+    eventType: "email.delivered",
+    deliveryStatus: "delivered",
+    notificationKind: "payout_arrived",
+    providerMessageId: "email-provider-001",
+    providerEventTime: now.getTime(),
+  });
+  assert.ok(!JSON.stringify(verified).includes("private-claimant@example.com"));
+  const unrelatedPayload = rawPayload.replace(
+    "payout_arrived",
+    "unrelated_product",
+  );
+  assert.equal(
+    verifyResendWebhook({
+      rawPayload: unrelatedPayload,
+      secret,
+      eventId: "msg_resend_unrelated_001",
+      timestamp: String(Math.floor(now.getTime() / 1_000)),
+      signature: new Webhook(secret).sign(
+        "msg_resend_unrelated_001",
+        now,
+        unrelatedPayload,
+      ),
+    }),
+    null,
+  );
+  assert.throws(
+    () =>
+      verifyResendWebhook({
+        rawPayload: `${rawPayload} `,
+        secret,
+        eventId,
+        timestamp: String(Math.floor(now.getTime() / 1_000)),
+        signature,
+      }),
+    /matching signature/i,
+  );
 });

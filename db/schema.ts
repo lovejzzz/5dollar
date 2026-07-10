@@ -236,6 +236,8 @@ export const notificationOutbox = sqliteTable(
     leaseToken: text("lease_token"),
     leaseExpiresAt: integer("lease_expires_at"),
     providerMessageId: text("provider_message_id"),
+    deliveryStatus: text("delivery_status"),
+    deliveredAt: integer("delivered_at"),
     lastError: text("last_error"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
@@ -243,11 +245,32 @@ export const notificationOutbox = sqliteTable(
   },
   (table) => [
     uniqueIndex("notification_outbox_event_key_idx").on(table.eventKey),
+    uniqueIndex("notification_outbox_provider_message_idx").on(
+      table.providerMessageId,
+    ),
     index("notification_outbox_delivery_idx").on(
       table.status,
       table.nextAttemptAt,
       table.leaseExpiresAt,
     ),
+  ],
+);
+
+export const resendWebhookEvents = sqliteTable(
+  "resend_webhook_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    eventType: text("event_type").notNull(),
+    notificationKind: text("notification_kind").notNull(),
+    notificationId: text("notification_id"),
+    providerMessageId: text("provider_message_id").notNull(),
+    providerEventTime: integer("provider_event_time").notNull(),
+    receivedAt: integer("received_at").notNull(),
+    appliedAt: integer("applied_at"),
+  },
+  (table) => [
+    index("resend_webhook_events_message_idx").on(table.providerMessageId),
+    index("resend_webhook_events_notification_idx").on(table.notificationId),
   ],
 );
 

@@ -26,6 +26,7 @@ export interface RuntimeEnv {
   PAYPAL_WEBHOOK_ID?: string;
   PAYPAL_API_BASE_URL?: string;
   RESEND_API_KEY?: string;
+  RESEND_WEBHOOK_SECRET?: string;
   NOTIFICATION_FROM_EMAIL?: string;
   SUPPORT_EMAIL?: string;
   SPONSOR_ALLOWED_EMAILS?: string;
@@ -44,6 +45,7 @@ export const REQUIRED_LIVE_SECRET_NAMES = [
   "PAYPAL_CLIENT_SECRET",
   "PAYPAL_WEBHOOK_ID",
   "RESEND_API_KEY",
+  "RESEND_WEBHOOK_SECRET",
   "NOTIFICATION_FROM_EMAIL",
   "SUPPORT_EMAIL",
 ] as const;

@@ -28,6 +28,7 @@ function runtime(database: FakeD1Database): RuntimeEnv {
     PAYPAL_CLIENT_SECRET: "paypal-secret-placeholder",
     PAYPAL_WEBHOOK_ID: "paypal-webhook-placeholder",
     RESEND_API_KEY: "resend-key-placeholder",
+    RESEND_WEBHOOK_SECRET: "whsec-resend-webhook-placeholder",
     NOTIFICATION_FROM_EMAIL: "FIVE <payouts@example.com>",
     SUPPORT_EMAIL: "support@example.com",
   };

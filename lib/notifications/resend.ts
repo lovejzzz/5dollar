@@ -79,6 +79,7 @@ export async function sendPayoutArrivalNotification(
         `PayPal reference: ${input.payoutReference}`,
         "If you do not recognize this request, reply to this message for support.",
       ]).join("\n\n"),
+      tags: [{ name: "category", value: input.kind }],
     }),
     signal: input.signal,
   });
