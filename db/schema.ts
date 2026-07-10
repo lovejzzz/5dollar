@@ -110,6 +110,32 @@ export const fundingReceipts = sqliteTable(
   ],
 );
 
+export const giftCardRewards = sqliteTable(
+  "gift_card_rewards",
+  {
+    taskId: text("task_id")
+      .primaryKey()
+      .references(() => fundedTasks.id),
+    provider: text("provider").notNull().default("tremendous"),
+    orderId: text("order_id").notNull(),
+    rewardId: text("reward_id").notNull(),
+    status: text("status").notNull().default("ISSUED"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+    deliveredAt: integer("delivered_at"),
+  },
+  (table) => [
+    uniqueIndex("gift_card_rewards_order_idx").on(table.orderId),
+    uniqueIndex("gift_card_rewards_reward_idx").on(table.rewardId),
+    index("gift_card_rewards_status_idx").on(table.status, table.updatedAt),
+    check("gift_card_rewards_provider_check", sql`${table.provider} = 'tremendous'`),
+    check(
+      "gift_card_rewards_status_check",
+      sql`${table.status} IN ('ISSUED', 'DELIVERY_PENDING', 'DELIVERED', 'CANCELED')`,
+    ),
+  ],
+);
+
 export const liveJobs = sqliteTable(
   "live_jobs",
   {

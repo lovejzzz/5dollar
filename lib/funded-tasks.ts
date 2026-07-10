@@ -15,6 +15,13 @@ export type FundedTaskSpec = {
   minAnswerChars?: number;
 };
 
+export type GiftCardTaskSpec = Omit<
+  FundedTaskSpec,
+  "fundingCaptureId" | "rewardCents"
+> & {
+  rewardCents: 500;
+};
+
 const PROHIBITED_TASK_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /fake\s+(review|rating|testimonial)/i, label: "fake reviews" },
   { pattern: /spam|mass\s*(email|message|dm)/i, label: "spam" },
@@ -42,6 +49,13 @@ export type ValidatedFundedTask = {
   automationAllowed: 1;
   autoAccept: 1;
   minAnswerChars: number;
+};
+
+export type ValidatedGiftCardTask = Omit<
+  ValidatedFundedTask,
+  "fundingCaptureId" | "rewardCents"
+> & {
+  rewardCents: 500;
 };
 
 type AcceptanceContract = {
@@ -157,7 +171,9 @@ export function submissionPassesAcceptance(input: {
   );
 }
 
-export function validateFundedTaskSpec(value: unknown): ValidatedFundedTask {
+function validateTaskCore(
+  value: unknown,
+): Omit<ValidatedGiftCardTask, "rewardCents"> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("A funded task must be a JSON object.");
   }
@@ -183,11 +199,6 @@ export function validateFundedTaskSpec(value: unknown): ValidatedFundedTask {
       "Sponsor reference must be 5-120 characters using letters, numbers, dots, colons, underscores, or hyphens.",
     );
   }
-  if (!Number.isInteger(task.rewardCents) || (task.rewardCents ?? 0) < 600) {
-    throw new Error(
-      "A task must be pre-funded for at least 600 cents so the $5 reward and execution costs are covered.",
-    );
-  }
   if (task.automationAllowed !== true) {
     throw new Error("The sponsor must explicitly allow automated completion.");
   }
@@ -196,12 +207,6 @@ export function validateFundedTaskSpec(value: unknown): ValidatedFundedTask {
       "The first live workflow accepts only pre-funded tasks with an explicit automatic-acceptance contract.",
     );
   }
-  const fundingCaptureId =
-    typeof task.fundingCaptureId === "string" ? task.fundingCaptureId.trim() : "";
-  if (!/^[A-Z0-9]{8,40}$/i.test(fundingCaptureId)) {
-    throw new Error("A valid PayPal funding capture ID is required.");
-  }
-
   let inputJson: string;
   try {
     inputJson = JSON.stringify(task.input ?? {});
@@ -231,17 +236,47 @@ export function validateFundedTaskSpec(value: unknown): ValidatedFundedTask {
   }
 
   return {
-    taskType: "dataset_summary",
+    taskType: "dataset_summary" as const,
     title,
     instructions,
     inputJson,
     acceptanceJson: JSON.stringify(acceptance),
-    rewardCents: task.rewardCents as number,
-    payoutCents: 500,
+    payoutCents: 500 as const,
     sponsorReference,
-    fundingCaptureId,
-    automationAllowed: 1,
-    autoAccept: 1,
+    automationAllowed: 1 as const,
+    autoAccept: 1 as const,
     minAnswerChars,
+  };
+}
+
+export function validateFundedTaskSpec(value: unknown): ValidatedFundedTask {
+  const task = value as Partial<FundedTaskSpec>;
+  if (!Number.isInteger(task.rewardCents) || (task.rewardCents ?? 0) < 600) {
+    throw new Error(
+      "A task must be pre-funded for at least 600 cents so the $5 reward and execution costs are covered.",
+    );
+  }
+  const core = validateTaskCore(value);
+  const fundingCaptureId =
+    typeof task.fundingCaptureId === "string" ? task.fundingCaptureId.trim() : "";
+  if (!/^[A-Z0-9]{8,40}$/i.test(fundingCaptureId)) {
+    throw new Error("A valid PayPal funding capture ID is required.");
+  }
+  return {
+    ...core,
+    rewardCents: task.rewardCents as number,
+    fundingCaptureId,
+  };
+}
+
+export function validateGiftCardTaskSpec(value: unknown): ValidatedGiftCardTask {
+  const task = value as Partial<GiftCardTaskSpec>;
+  if (task.rewardCents !== 500) {
+    throw new Error("A gift-card task must reserve exactly one $5 reward.");
+  }
+  const core = validateTaskCore(value);
+  return {
+    ...core,
+    rewardCents: 500,
   };
 }

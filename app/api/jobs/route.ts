@@ -6,7 +6,12 @@ import {
 import { createLiveJob } from "../../../lib/live-jobs";
 import { inferPayPalRecipientType } from "../../../lib/payouts/paypal";
 import { processLiveJob } from "../../../lib/process-live-job";
-import { getFiveMode, getRuntimeEnv, requireLiveEnv } from "../../../lib/runtime-env";
+import {
+  getFiveMode,
+  getRewardProvider,
+  getRuntimeEnv,
+  requireActiveLiveEnv,
+} from "../../../lib/runtime-env";
 import {
   chatGPTSignInPath,
   getChatGPTUser,
@@ -43,7 +48,7 @@ export async function POST(request: Request) {
 
     const runtime = getRuntimeEnv();
     if (getFiveMode(runtime) === "live") {
-      requireLiveEnv(runtime);
+      const liveRuntime = requireActiveLiveEnv(runtime);
       const user = await getChatGPTUser();
       if (!user) {
         return Response.json(
@@ -54,7 +59,17 @@ export async function POST(request: Request) {
           { status: 401 },
         );
       }
-      if (payoutMethod !== "paypal" || !inferPayPalRecipientType(destination)) {
+      const rewardProvider = getRewardProvider(liveRuntime);
+      if (rewardProvider === "tremendous" && payoutMethod !== "gift_card") {
+        return Response.json(
+          { error: "Live rewards currently support a $5 digital gift card delivered by email." },
+          { status: 400 },
+        );
+      }
+      if (
+        rewardProvider === "paypal" &&
+        (payoutMethod !== "paypal" || !inferPayPalRecipientType(destination))
+      ) {
         return Response.json(
           {
             error:
@@ -66,11 +81,11 @@ export async function POST(request: Request) {
 
       const job = await createLiveJob({
         ownerEmail: user.email,
-        payoutMethod: "paypal",
+        payoutMethod: rewardProvider === "tremendous" ? "gift_card" : "paypal",
         destination,
-        runtime,
+        runtime: liveRuntime,
       });
-      waitUntil(processLiveJob(job.id, { runtime }).catch(() => undefined));
+      waitUntil(processLiveJob(job.id, { runtime: liveRuntime }).catch(() => undefined));
       return Response.json({ job }, { status: 202 });
     }
 

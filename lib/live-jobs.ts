@@ -14,7 +14,11 @@ import {
   type ResendDeliveryStatus,
   type VerifiedResendDeliveryEvent,
 } from "./resend-webhooks";
-import { getRuntimeEnv, type RuntimeEnv } from "./runtime-env";
+import {
+  getRewardProvider,
+  getRuntimeEnv,
+  type RuntimeEnv,
+} from "./runtime-env";
 
 export type LiveJobStatus =
   | "no_inventory"
@@ -30,10 +34,12 @@ export type LiveJobStatus =
   | "reversed"
   | "failed";
 
+export type LiveRewardMethod = "paypal" | "gift_card";
+
 export type LiveJobRow = {
   id: string;
   owner_email: string;
-  payout_method: "paypal";
+  payout_method: LiveRewardMethod;
   destination_ciphertext: string;
   destination_fingerprint: string;
   destination_hint: string;
@@ -75,7 +81,7 @@ export type FundedTaskRow = {
   created_at: number;
   updated_at: number;
   accepted_at: number | null;
-  funding_provider: "paypal";
+  funding_provider: "paypal" | "tremendous";
   funding_capture_id: string;
   funding_status: string;
   funding_currency: string;
@@ -115,7 +121,7 @@ export type NotificationOutboxRow = {
   id: string;
   event_key: string;
   job_id: string;
-  kind: "payout_arrived" | "payout_reversed";
+  kind: "payout_arrived" | "payout_reversed" | "gift_card_ready";
   payout_reference: string;
   status: "pending" | "sending" | "retry_wait" | "sent" | "canceled" | "failed";
   attempts: number;
@@ -130,6 +136,9 @@ export type NotificationOutboxRow = {
   updated_at: number;
   sent_at: number | null;
   owner_email: string;
+  payout_method: LiveRewardMethod;
+  destination_ciphertext: string;
+  destination_fingerprint: string;
 };
 
 export type LiveJobActivity = {
@@ -145,8 +154,8 @@ export type PublicLiveJob = {
   requestCode: string;
   amountCents: number;
   mode: "live";
-  payoutMethod: "paypal";
-  payoutMethodLabel: "PayPal";
+  payoutMethod: LiveRewardMethod;
+  payoutMethodLabel: "PayPal" | "$5 gift card";
   destinationHint: string;
   status: LiveJobStatus;
   progress: number;
@@ -158,7 +167,7 @@ export type PublicLiveJob = {
   activities: LiveJobActivity[];
 };
 
-const LIVE_STEPS = [
+const PAYPAL_LIVE_STEPS = [
   {
     title: "Request received",
     detail: "Your payout destination was encrypted and the request was recorded.",
@@ -190,6 +199,45 @@ const LIVE_STEPS = [
     kinds: ["payout_succeeded"],
   },
 ] as const;
+
+const GIFT_CARD_LIVE_STEPS = [
+  {
+    title: "Request received",
+    detail: "Your delivery email was encrypted and the request was recorded.",
+    kinds: ["request_received"],
+  },
+  {
+    title: "Funded task reserved",
+    detail: "A sponsor-funded task with a pre-issued $5 reward is assigned.",
+    kinds: ["task_reserved"],
+  },
+  {
+    title: "AI completing the work",
+    detail: "The agent is producing the sponsor deliverable from approved task data.",
+    kinds: ["earning_started"],
+  },
+  {
+    title: "Work accepted",
+    detail: "The evidence contract accepted the checked deliverable.",
+    kinds: ["earning_accepted"],
+  },
+  {
+    title: "Gift card sent",
+    detail: "A just-in-time redemption link is being delivered to your email.",
+    kinds: ["gift_card_delivery_started", "notification_sent"],
+  },
+  {
+    title: "$5 gift card delivered",
+    detail: "The recipient mail server accepted the redemption email.",
+    kinds: ["gift_card_delivered"],
+  },
+] as const;
+
+function stepsFor(job: LiveJobRow) {
+  return job.payout_method === "gift_card"
+    ? GIFT_CARD_LIVE_STEPS
+    : PAYPAL_LIVE_STEPS;
+}
 
 function database(runtime: RuntimeEnv = getRuntimeEnv()): D1Database {
   const binding = runtime.DB as D1Database | undefined;
@@ -253,6 +301,27 @@ export async function ensureLiveDatabase(runtime: RuntimeEnv = getRuntimeEnv()) 
     ),
     db.prepare(
       "CREATE UNIQUE INDEX IF NOT EXISTS funding_receipts_task_id_idx ON funding_receipts (task_id)",
+    ),
+    db.prepare(`CREATE TABLE IF NOT EXISTS gift_card_rewards (
+      task_id TEXT PRIMARY KEY NOT NULL,
+      provider TEXT NOT NULL DEFAULT 'tremendous' CHECK (provider = 'tremendous'),
+      order_id TEXT NOT NULL,
+      reward_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ISSUED'
+        CHECK (status IN ('ISSUED', 'DELIVERY_PENDING', 'DELIVERED', 'CANCELED')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      delivered_at INTEGER,
+      FOREIGN KEY (task_id) REFERENCES funded_tasks(id)
+    )`),
+    db.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS gift_card_rewards_order_idx ON gift_card_rewards (order_id)",
+    ),
+    db.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS gift_card_rewards_reward_idx ON gift_card_rewards (reward_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS gift_card_rewards_status_idx ON gift_card_rewards (status, updated_at)",
     ),
     db.prepare(`CREATE TABLE IF NOT EXISTS live_jobs (
       id TEXT PRIMARY KEY NOT NULL,
@@ -494,6 +563,23 @@ function normalizePayPalDestination(value: string) {
   return normalized.includes("@") ? normalized.toLowerCase() : normalized;
 }
 
+function normalizeGiftCardDestination(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized.length > 254 ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)
+  ) {
+    throw new Error("A valid email is required for gift-card delivery.");
+  }
+  return normalized;
+}
+
+function normalizeLiveDestination(method: LiveRewardMethod, value: string) {
+  return method === "gift_card"
+    ? normalizeGiftCardDestination(value)
+    : normalizePayPalDestination(value);
+}
+
 function maskDestination(value: string) {
   if (value.includes("@")) {
     const [local, domain] = value.split("@", 2);
@@ -544,6 +630,7 @@ function statusStep(job: LiveJobRow) {
 }
 
 function statusCopy(job: LiveJobRow) {
+  const giftCard = job.payout_method === "gift_card";
   switch (job.status) {
     case "no_inventory":
       return {
@@ -568,7 +655,9 @@ function statusCopy(job: LiveJobRow) {
     case "earned":
       return {
         headline: "Your $5 was earned.",
-        message: "The funded task accepted the deliverable. The payout is next.",
+        message: giftCard
+          ? "The funded task accepted the deliverable. Your gift card is next."
+          : "The funded task accepted the deliverable. The payout is next.",
       };
     case "retry_wait":
       return {
@@ -577,23 +666,31 @@ function statusCopy(job: LiveJobRow) {
       };
     case "payout_pending":
       return {
-        headline: "Your payout is processing.",
-        message: "PayPal has the $5 request. We will call it paid only after item-level success confirmation.",
+        headline: giftCard ? "Your gift card is on its way." : "Your payout is processing.",
+        message: giftCard
+          ? "The $5 reward is issued. We will call it delivered after your mail server accepts the redemption email."
+          : "PayPal has the $5 request. We will call it paid only after item-level success confirmation.",
       };
     case "payout_submitting":
       return {
-        headline: "Submitting your payout safely.",
-        message: "Five is creating one idempotent PayPal payout and will wait for item-level confirmation.",
+        headline: giftCard ? "Preparing your gift card." : "Submitting your payout safely.",
+        message: giftCard
+          ? "Five is verifying the pre-issued $5 reward before generating its private redemption link."
+          : "Five is creating one idempotent PayPal payout and will wait for item-level confirmation.",
       };
     case "needs_action":
       return {
-        headline: "PayPal needs your attention.",
-        message: "The payout is held, blocked, or unclaimed. Check the message from PayPal for the next step.",
+        headline: giftCard ? "Gift-card delivery needs support." : "PayPal needs your attention.",
+        message: giftCard
+          ? "The funded reward remains reserved, but the delivery workflow could not finish automatically."
+          : "The payout is held, blocked, or unclaimed. Check the message from PayPal for the next step.",
       };
     case "paid":
       return {
-        headline: "Your $5 has arrived.",
-        message: "PayPal confirmed that the individual payout item succeeded.",
+        headline: giftCard ? "Your $5 gift card has arrived." : "Your $5 has arrived.",
+        message: giftCard
+          ? "Your mail server accepted the private gift-card redemption email."
+          : "PayPal confirmed that the individual payout item succeeded.",
       };
     case "reversed":
       return {
@@ -626,16 +723,17 @@ async function publicLiveJob(db: D1Database, job: LiveJobRow): Promise<PublicLiv
   }
   const currentStep = statusStep(job);
   const copy = statusCopy(job);
+  const steps = stepsFor(job);
   return {
     id: job.id,
     requestCode: `FIVE-${job.id.slice(0, 6).toUpperCase()}`,
     amountCents: job.amount_cents,
     mode: "live",
-    payoutMethod: "paypal",
-    payoutMethodLabel: "PayPal",
+    payoutMethod: job.payout_method,
+    payoutMethodLabel: job.payout_method === "gift_card" ? "$5 gift card" : "PayPal",
     destinationHint: job.destination_hint,
     status: job.status,
-    progress: Math.round(((currentStep + 1) / LIVE_STEPS.length) * 100),
+    progress: Math.round(((currentStep + 1) / steps.length) * 100),
     headline: copy.headline,
     message: copy.message,
     payoutReference: ["paid", "reversed"].includes(job.status)
@@ -643,18 +741,18 @@ async function publicLiveJob(db: D1Database, job: LiveJobRow): Promise<PublicLiv
       : null,
     createdAt: new Date(job.created_at).toISOString(),
     completedAt: job.completed_at ? new Date(job.completed_at).toISOString() : null,
-    activities: LIVE_STEPS.map((step, index) => {
+    activities: steps.map((step, index) => {
       const occurredAt = step.kinds.map((kind) => eventTimes.get(kind)).find(Boolean) ?? null;
       return {
         step: index,
         title:
-          index === LIVE_STEPS.length - 1 && job.status === "reversed"
+          index === steps.length - 1 && job.status === "reversed"
             ? "Payout reversed"
             : index === 1 && job.status === "no_inventory"
             ? "Waiting for a funded task"
             : step.title,
         detail:
-          index === LIVE_STEPS.length - 1 && job.status === "reversed"
+          index === steps.length - 1 && job.status === "reversed"
             ? "PayPal later reported that the payout was returned or refunded; support must review it."
             : index === 1 && job.status === "no_inventory"
             ? "A sponsor must pre-fund an automation-approved task before Five can earn the reward."
@@ -668,7 +766,7 @@ async function publicLiveJob(db: D1Database, job: LiveJobRow): Promise<PublicLiv
                 ? "done"
                 : "pending",
         occurredAt:
-          index === LIVE_STEPS.length - 1 && job.status === "reversed"
+          index === steps.length - 1 && job.status === "reversed"
             ? eventTimes.get("payout_reversed") ?? occurredAt
             : occurredAt,
       };
@@ -678,15 +776,19 @@ async function publicLiveJob(db: D1Database, job: LiveJobRow): Promise<PublicLiv
 
 export async function createLiveJob(input: {
   ownerEmail: string;
-  payoutMethod: "paypal";
+  payoutMethod: LiveRewardMethod;
   destination: string;
   runtime?: RuntimeEnv;
 }) {
   const runtime = input.runtime ?? getRuntimeEnv();
   const db = await ensureLiveDatabase(runtime);
   const ownerEmail = normalizeOwnerEmail(input.ownerEmail);
-  const destination = normalizePayPalDestination(input.destination);
-  const fingerprint = await fingerprintPayoutDestination("paypal", destination, runtime);
+  const destination = normalizeLiveDestination(input.payoutMethod, input.destination);
+  const fingerprint = await fingerprintPayoutDestination(
+    input.payoutMethod,
+    destination,
+    runtime,
+  );
 
   const existing = await db
     .prepare(
@@ -715,11 +817,12 @@ export async function createLiveJob(input: {
            (id, owner_email, payout_method, destination_ciphertext,
             destination_fingerprint, destination_hint, amount_cents, status,
             task_id, created_at, updated_at)
-           VALUES (?, ?, 'paypal', ?, ?, ?, 500, 'no_inventory', NULL, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, 500, 'no_inventory', NULL, ?, ?)`,
         )
         .bind(
           id,
           ownerEmail,
+          input.payoutMethod,
           ciphertext,
           fingerprint,
           maskDestination(destination),
@@ -735,7 +838,9 @@ export async function createLiveJob(input: {
         .bind(
           `job:${id}:received`,
           id,
-          "The encrypted request is waiting for funded task inventory.",
+          input.payoutMethod === "gift_card"
+            ? "The encrypted delivery email is waiting for pre-funded gift-card task inventory."
+            : "The encrypted request is waiting for funded task inventory.",
           now,
         ),
     ]);
@@ -952,9 +1057,15 @@ export async function createFundedTask(
 
 async function matchOneWaitingJob(db: D1Database) {
   const waiting = await db
-    .prepare("SELECT id FROM live_jobs WHERE status = 'no_inventory' ORDER BY created_at LIMIT 1")
-    .first<{ id: string }>();
+    .prepare(
+      "SELECT id, payout_method FROM live_jobs WHERE status = 'no_inventory' ORDER BY created_at LIMIT 1",
+    )
+    .first<{ id: string; payout_method: LiveRewardMethod }>();
   if (!waiting) return false;
+  const giftCard = waiting.payout_method === "gift_card";
+  const minimumRewardCents = giftCard ? 500 : 600;
+  const fundingProvider = giftCard ? "tremendous" : "paypal";
+  const fundingStatus = giftCard ? "EXECUTED" : "COMPLETED";
   const now = Date.now();
   await db.batch([
     db
@@ -967,10 +1078,10 @@ async function matchOneWaitingJob(db: D1Database) {
            WHERE ft.status = 'available'
              AND ft.automation_allowed = 1
              AND ft.auto_accept = 1
-             AND ft.reward_cents >= 600
+             AND ft.reward_cents >= ?
              AND ft.payout_cents = 500
-             AND fr.provider = 'paypal'
-             AND fr.status = 'COMPLETED'
+             AND fr.provider = ?
+             AND fr.status = ?
              AND fr.currency = 'USD'
              AND fr.net_cents >= ft.reward_cents
            ORDER BY ft.created_at ASC
@@ -981,7 +1092,14 @@ async function matchOneWaitingJob(db: D1Database) {
            SELECT 1 FROM live_jobs WHERE id = ? AND status = 'no_inventory'
          )`,
       )
-      .bind(waiting.id, now, waiting.id),
+      .bind(
+        waiting.id,
+        now,
+        minimumRewardCents,
+        fundingProvider,
+        fundingStatus,
+        waiting.id,
+      ),
     db
       .prepare(
         `UPDATE live_jobs
@@ -1008,7 +1126,9 @@ async function matchOneWaitingJob(db: D1Database) {
       .bind(
         waiting.id,
         waiting.id,
-        "A verified, pre-funded, automation-approved sponsor task was assigned.",
+        giftCard
+          ? "A verified task with a pre-issued $5 gift card was assigned."
+          : "A verified, pre-funded, automation-approved sponsor task was assigned.",
         now,
         waiting.id,
       ),
@@ -1087,6 +1207,7 @@ export async function taskForLiveJob(
 ) {
   if (!job.task_id) return null;
   const db = await ensureLiveDatabase(runtime);
+  const giftCard = job.payout_method === "gift_card";
   return db
     .prepare(
       `SELECT ft.*,
@@ -1099,11 +1220,16 @@ export async function taskForLiveJob(
        FROM funded_tasks ft
        JOIN funding_receipts fr ON fr.id = ft.funding_receipt_id
        WHERE ft.id = ? AND ft.lease_job_id = ?
-         AND fr.provider = 'paypal' AND fr.status = 'COMPLETED'
+         AND fr.provider = ? AND fr.status = ?
          AND fr.currency = 'USD' AND fr.net_cents >= ft.reward_cents
        LIMIT 1`,
     )
-    .bind(job.task_id, job.id)
+    .bind(
+      job.task_id,
+      job.id,
+      giftCard ? "tremendous" : "paypal",
+      giftCard ? "EXECUTED" : "COMPLETED",
+    )
     .first<FundedTaskRow>();
 }
 
@@ -1114,7 +1240,7 @@ export async function decryptLiveJobDestination(
   const destination = await decryptPayoutDestination(job.destination_ciphertext, runtime);
   const fingerprint = await fingerprintPayoutDestination(
     job.payout_method,
-    normalizePayPalDestination(destination),
+    normalizeLiveDestination(job.payout_method, destination),
     runtime,
   );
   if (!(await constantTimeSecretEqual(fingerprint, job.destination_fingerprint))) {
@@ -1321,6 +1447,132 @@ export async function markPayoutPending(input: {
         now,
         input.job.id,
         input.batchStatus,
+      ),
+  ]);
+  const updated = await liveJobRow(db, input.job.id);
+  return updated?.status === "payout_pending" || updated?.status === "paid";
+}
+
+export async function markGiftCardDeliveryPending(input: {
+  job: LiveJobRow;
+  runtime?: RuntimeEnv;
+}) {
+  if (input.job.payout_method !== "gift_card" || !input.job.task_id) {
+    throw new Error("The live job is not attached to a gift-card reward.");
+  }
+  const db = await ensureLiveDatabase(input.runtime ?? getRuntimeEnv());
+  const reward = await db
+    .prepare(
+      `SELECT task_id, order_id, reward_id, status
+       FROM gift_card_rewards WHERE task_id = ? LIMIT 1`,
+    )
+    .bind(input.job.task_id)
+    .first<{
+      task_id: string;
+      order_id: string;
+      reward_id: string;
+      status: string;
+    }>();
+  if (
+    !reward ||
+    !["ISSUED", "DELIVERY_PENDING", "DELIVERED"].includes(reward.status)
+  ) {
+    throw new Error("The pre-issued gift card is unavailable for delivery.");
+  }
+  const now = Date.now();
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE live_jobs SET status = 'payout_pending',
+         provider_status = 'REWARD_ISSUED', lease_token = NULL,
+         lease_expires_at = NULL, next_attempt_at = NULL, attempts = 0,
+         last_error_code = NULL, last_error_message = NULL, updated_at = ?
+         WHERE id = ? AND payout_method = 'gift_card'
+           AND status = 'payout_submitting' AND lease_token = ?
+           AND earned_cents >= 500 AND task_id = ?`,
+      )
+      .bind(now, input.job.id, input.job.lease_token, reward.task_id),
+    db
+      .prepare(
+        `UPDATE gift_card_rewards
+         SET status = CASE WHEN status = 'DELIVERED' THEN status ELSE 'DELIVERY_PENDING' END,
+             updated_at = ?
+         WHERE task_id = ? AND order_id = ? AND reward_id = ?
+           AND status IN ('ISSUED', 'DELIVERY_PENDING', 'DELIVERED')
+           AND EXISTS (
+             SELECT 1 FROM live_jobs
+             WHERE id = ? AND status = 'payout_pending' AND task_id = ?
+           )`,
+      )
+      .bind(
+        now,
+        reward.task_id,
+        reward.order_id,
+        reward.reward_id,
+        input.job.id,
+        reward.task_id,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO payouts
+         (id, job_id, sender_batch_id, sender_item_id, provider_batch_id,
+          provider_item_id, status, created_at, updated_at)
+         SELECT ?, ?, ?, ?, ?, ?, 'REWARD_ISSUED', ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM live_jobs
+           WHERE id = ? AND status = 'payout_pending' AND task_id = ?
+         )`,
+      )
+      .bind(
+        `payout:${input.job.id}`,
+        input.job.id,
+        `tremendous:${reward.order_id}`,
+        `tremendous:${reward.reward_id}`,
+        reward.order_id,
+        reward.reward_id,
+        now,
+        now,
+        input.job.id,
+        reward.task_id,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO notification_outbox
+         (id, event_key, job_id, kind, payout_reference, status,
+          created_at, updated_at)
+         SELECT ?, ?, ?, 'gift_card_ready', ?, 'pending', ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM live_jobs
+           WHERE id = ? AND status = 'payout_pending' AND task_id = ?
+         )`,
+      )
+      .bind(
+        `notification:${input.job.id}:gift-card-ready`,
+        `job:${input.job.id}:gift-card-ready`,
+        input.job.id,
+        reward.reward_id,
+        now,
+        now,
+        input.job.id,
+        reward.task_id,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO live_job_events
+         (event_key, job_id, kind, title, detail, created_at)
+         SELECT ?, ?, 'gift_card_delivery_started', 'Gift card prepared', ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM live_jobs
+           WHERE id = ? AND status = 'payout_pending' AND task_id = ?
+         )`,
+      )
+      .bind(
+        `job:${input.job.id}:gift-card-delivery-started`,
+        input.job.id,
+        "The pre-issued $5 reward was verified and queued for private email delivery.",
+        now,
+        input.job.id,
+        reward.task_id,
       ),
   ]);
   const updated = await liveJobRow(db, input.job.id);
@@ -2226,7 +2478,8 @@ type ResendWebhookEventRow = {
 type NotificationDeliveryRow = {
   id: string;
   job_id: string;
-  kind: "payout_arrived" | "payout_reversed";
+  kind: ResendNotificationKind;
+  payout_reference: string;
   delivery_status: ResendDeliveryStatus | null;
 };
 
@@ -2241,7 +2494,11 @@ async function applyResendEventToNotification(
   const now = Date.now();
   const terminal = isTerminalResendDeliveryStatus(event.deliveryStatus);
   const noticeName =
-    notification.kind === "payout_reversed" ? "Reversal notice" : "Arrival notice";
+    notification.kind === "gift_card_ready"
+      ? "Gift-card email"
+      : notification.kind === "payout_reversed"
+        ? "Reversal notice"
+        : "Arrival notice";
   const title = terminal
     ? `${noticeName} delivery failed`
     : event.deliveryStatus === "delivered"
@@ -2250,7 +2507,9 @@ async function applyResendEventToNotification(
   const detail = terminal
     ? "The notification provider reported that the transactional email could not reach the recipient mail server."
     : event.deliveryStatus === "delivered"
-      ? "The recipient mail server accepted the transactional payout notification."
+      ? notification.kind === "gift_card_ready"
+        ? "The recipient mail server accepted the private gift-card redemption email."
+        : "The recipient mail server accepted the transactional payout notification."
       : "The notification provider reported a temporary delay reaching the recipient mail server.";
   const deliveryUpdate = terminal
     ? db
@@ -2305,6 +2564,92 @@ async function applyResendEventToNotification(
         notification.id,
       ),
     deliveryUpdate,
+    ...(notification.kind === "gift_card_ready" && event.deliveryStatus === "delivered"
+      ? [
+          db
+            .prepare(
+              `UPDATE live_jobs
+               SET status = 'paid', provider_status = 'EMAIL_DELIVERED',
+                   completed_at = COALESCE(completed_at, ?), updated_at = ?,
+                   last_error_code = NULL, last_error_message = NULL
+               WHERE id = ? AND payout_method = 'gift_card'
+                 AND status = 'payout_pending'
+                 AND EXISTS (
+                   SELECT 1 FROM notification_outbox
+                   WHERE id = ? AND job_id = ? AND kind = 'gift_card_ready'
+                     AND status = 'sent' AND provider_message_id = ?
+                 )`,
+            )
+            .bind(
+              event.providerEventTime,
+              now,
+              notification.job_id,
+              notification.id,
+              notification.job_id,
+              event.providerMessageId,
+            ),
+          db
+            .prepare(
+              `UPDATE gift_card_rewards
+               SET status = 'DELIVERED', delivered_at = COALESCE(delivered_at, ?),
+                   updated_at = ?
+               WHERE task_id = (
+                 SELECT task_id FROM live_jobs
+                 WHERE id = ? AND status = 'paid' AND payout_method = 'gift_card'
+               ) AND status IN ('ISSUED', 'DELIVERY_PENDING', 'DELIVERED')`,
+            )
+            .bind(event.providerEventTime, now, notification.job_id),
+          db
+            .prepare(
+              `UPDATE payouts SET status = 'DELIVERED', updated_at = ?
+               WHERE job_id = ? AND provider_item_id = ?
+                 AND EXISTS (
+                   SELECT 1 FROM live_jobs WHERE id = ? AND status = 'paid'
+                 )`,
+            )
+            .bind(
+              now,
+              notification.job_id,
+              notification.payout_reference,
+              notification.job_id,
+            ),
+          db
+            .prepare(
+              `INSERT OR IGNORE INTO live_job_events
+               (event_key, job_id, kind, title, detail, created_at)
+               SELECT ?, ?, 'gift_card_delivered', '$5 gift card delivered', ?, ?
+               WHERE EXISTS (
+                 SELECT 1 FROM live_jobs WHERE id = ? AND status = 'paid'
+               )`,
+            )
+            .bind(
+              `job:${notification.job_id}:gift-card-delivered`,
+              notification.job_id,
+              "The recipient mail server accepted the private redemption email.",
+              now,
+              notification.job_id,
+            ),
+        ]
+      : []),
+    ...(notification.kind === "gift_card_ready" && terminal
+      ? [
+          db
+            .prepare(
+              `UPDATE live_jobs
+               SET status = 'needs_action', provider_status = ?,
+                   last_error_code = 'gift_card_email_delivery_failed',
+                   last_error_message = ?, updated_at = ?
+               WHERE id = ? AND payout_method = 'gift_card'
+                 AND status = 'payout_pending'`,
+            )
+            .bind(
+              `EMAIL_${event.deliveryStatus.toUpperCase()}`,
+              "The gift-card redemption email could not reach the recipient mail server.",
+              now,
+              notification.job_id,
+            ),
+        ]
+      : []),
     db
       .prepare(
         `INSERT OR IGNORE INTO live_job_events
@@ -2414,7 +2759,7 @@ export async function applyResendDeliveryEvent(
 
   const notification = await db
     .prepare(
-      `SELECT id, job_id, kind, delivery_status
+      `SELECT id, job_id, kind, payout_reference, delivery_status
        FROM notification_outbox
        WHERE provider_message_id = ? AND status = 'sent' LIMIT 1`,
     )
@@ -2447,7 +2792,7 @@ async function reconcilePendingResendEvents(
 ) {
   const notification = await db
     .prepare(
-      `SELECT id, job_id, kind, delivery_status
+      `SELECT id, job_id, kind, payout_reference, delivery_status
        FROM notification_outbox
        WHERE provider_message_id = ? AND status = 'sent' LIMIT 1`,
     )
@@ -2509,7 +2854,8 @@ export async function claimNotification(
            AND (no.lease_expires_at IS NULL OR no.lease_expires_at < ?)
            AND (
              (no.kind = 'payout_arrived' AND lj.status = 'paid') OR
-             (no.kind = 'payout_reversed' AND lj.status = 'reversed')
+             (no.kind = 'payout_reversed' AND lj.status = 'reversed') OR
+             (no.kind = 'gift_card_ready' AND lj.status = 'payout_pending')
            )
          ORDER BY no.created_at LIMIT 1
        )
@@ -2520,13 +2866,38 @@ export async function claimNotification(
   if (!row) return null;
   return db
     .prepare(
-      `SELECT no.*, lj.owner_email
+      `SELECT no.*, lj.owner_email, lj.payout_method,
+              lj.destination_ciphertext, lj.destination_fingerprint
        FROM notification_outbox no
        JOIN live_jobs lj ON lj.id = no.job_id
        WHERE no.id = ? AND no.lease_token = ? LIMIT 1`,
     )
     .bind(row.id, token)
     .first<NotificationOutboxRow>();
+}
+
+export async function notificationRecipient(
+  notification: NotificationOutboxRow,
+  runtime: RuntimeEnv = getRuntimeEnv(),
+) {
+  if (notification.kind !== "gift_card_ready") {
+    return normalizeOwnerEmail(notification.owner_email);
+  }
+  if (notification.payout_method !== "gift_card") {
+    throw new Error("The gift-card notification is not attached to a gift-card job.");
+  }
+  const destination = normalizeGiftCardDestination(
+    await decryptPayoutDestination(notification.destination_ciphertext, runtime),
+  );
+  const fingerprint = await fingerprintPayoutDestination(
+    "gift_card",
+    destination,
+    runtime,
+  );
+  if (!(await constantTimeSecretEqual(fingerprint, notification.destination_fingerprint))) {
+    throw new Error("The encrypted gift-card email failed its integrity check.");
+  }
+  return destination;
 }
 
 export async function notificationStillCurrent(input: {
@@ -2542,7 +2913,8 @@ export async function notificationStillCurrent(input: {
        WHERE no.id = ? AND no.status = 'sending' AND no.lease_token = ?
          AND (
            (no.kind = 'payout_arrived' AND lj.status = 'paid') OR
-           (no.kind = 'payout_reversed' AND lj.status = 'reversed')
+           (no.kind = 'payout_reversed' AND lj.status = 'reversed') OR
+           (no.kind = 'gift_card_ready' AND lj.status = 'payout_pending')
          )
        LIMIT 1`,
     )
@@ -2589,9 +2961,13 @@ export async function markNotificationSent(input: {
         input.notification.job_id,
         input.notification.kind === "payout_reversed"
           ? "Reversal notice sent"
+          : input.notification.kind === "gift_card_ready"
+            ? "Gift-card email sent"
           : "Arrival notice sent",
         input.notification.kind === "payout_reversed"
           ? "A transactional email reported that PayPal later returned or refunded the payout."
+          : input.notification.kind === "gift_card_ready"
+            ? "A private $5 gift-card redemption link was sent without storing the link."
           : "A transactional email confirmed that PayPal reported the $5 payout succeeded.",
         now,
         input.notification.id,
@@ -2634,6 +3010,7 @@ export async function markNotificationRetry(input: {
 
 export async function liveSystemStats(runtime: RuntimeEnv = getRuntimeEnv()) {
   const db = await ensureLiveDatabase(runtime);
+  const giftCard = getRewardProvider(runtime) === "tremendous";
   const [tasks, waiting] = await Promise.all([
     db
       .prepare(
@@ -2641,9 +3018,14 @@ export async function liveSystemStats(runtime: RuntimeEnv = getRuntimeEnv()) {
          FROM funded_tasks ft
          JOIN funding_receipts fr ON fr.id = ft.funding_receipt_id
          WHERE ft.status = 'available' AND ft.automation_allowed = 1
-           AND ft.auto_accept = 1 AND ft.reward_cents >= 600
-           AND fr.provider = 'paypal' AND fr.status = 'COMPLETED'
+           AND ft.auto_accept = 1 AND ft.reward_cents >= ?
+           AND fr.provider = ? AND fr.status = ?
            AND fr.currency = 'USD' AND fr.net_cents >= ft.reward_cents`,
+      )
+      .bind(
+        giftCard ? 500 : 600,
+        giftCard ? "tremendous" : "paypal",
+        giftCard ? "EXECUTED" : "COMPLETED",
       )
       .first<{ count: number }>(),
     db

@@ -2,6 +2,7 @@ import {
   claimNotification,
   markNotificationRetry,
   markNotificationSent,
+  notificationRecipient,
   notificationStillCurrent,
 } from "./live-jobs";
 import {
@@ -9,20 +10,25 @@ import {
   sendPayoutArrivalNotification,
 } from "./notifications/resend";
 import {
+  generateTremendousRewardLink,
+  TremendousApiError,
+} from "./rewards/tremendous";
+import {
   getRuntimeEnv,
-  requireLiveEnv,
+  requireActiveLiveEnv,
   type RuntimeEnv,
 } from "./runtime-env";
 
 type NotificationDependencies = {
   send?: typeof sendPayoutArrivalNotification;
+  generateRewardLink?: typeof generateTremendousRewardLink;
 };
 
 export async function processNotification(options: {
   runtime?: RuntimeEnv;
   dependencies?: NotificationDependencies;
 } = {}) {
-  const runtime = requireLiveEnv(options.runtime ?? getRuntimeEnv());
+  const runtime = requireActiveLiveEnv(options.runtime ?? getRuntimeEnv());
   const notification = await claimNotification(runtime);
   if (!notification) return { processed: false as const, reason: "no_work" as const };
 
@@ -38,14 +44,32 @@ export async function processNotification(options: {
   const timer = setTimeout(() => controller.abort(), 20_000);
   try {
     const send = options.dependencies?.send ?? sendPayoutArrivalNotification;
+    let redemptionLink: string | undefined;
+    if (notification.kind === "gift_card_ready") {
+      if (runtime.REWARD_PROVIDER !== "tremendous") {
+        throw new Error("Gift-card notification provider configuration is unavailable.");
+      }
+      const generateLink =
+        options.dependencies?.generateRewardLink ?? generateTremendousRewardLink;
+      const generated = await generateLink({
+        apiKey: runtime.TREMENDOUS_API_KEY,
+        rewardId: notification.payout_reference,
+        signal: controller.signal,
+        ...(runtime.TREMENDOUS_API_BASE_URL
+          ? { baseUrl: runtime.TREMENDOUS_API_BASE_URL }
+          : { environment: runtime.TREMENDOUS_MODE }),
+      });
+      redemptionLink = generated.link;
+    }
     const result = await send({
       apiKey: runtime.RESEND_API_KEY,
       from: runtime.NOTIFICATION_FROM_EMAIL,
-      to: notification.owner_email,
+      to: await notificationRecipient(notification, runtime),
       requestCode: `FIVE-${notification.job_id.slice(0, 6).toUpperCase()}`,
       payoutReference: notification.payout_reference,
       idempotencyKey: notification.event_key,
       kind: notification.kind,
+      redemptionLink,
       baseUrl: runtime.RESEND_API_BASE_URL,
       signal: controller.signal,
     });
@@ -63,6 +87,8 @@ export async function processNotification(options: {
     const retryable =
       error instanceof TypeError ||
       (error instanceof DOMException && error.name === "AbortError") ||
+      (error instanceof TremendousApiError &&
+        (error.status === 408 || error.status === 429 || error.status >= 500)) ||
       (error instanceof NotificationApiError &&
         ((error.status >= 200 && error.status < 300) ||
           (error.status === 409 &&

@@ -9,12 +9,14 @@ import {
   decryptLiveJobDestination,
   getOrCreatePayout,
   markEarningAccepted,
+  markGiftCardDeliveryPending,
   markLiveJobRetry,
   markPayoutPending,
   taskForLiveJob,
   type FundedTaskRow,
   type LiveJobRow,
 } from "./live-jobs";
+import { giftCardRewardForTask } from "./gift-card-tasks";
 import { submissionPassesAcceptance } from "./funded-tasks";
 import {
   createPayPalFiveDollarPayout,
@@ -26,8 +28,13 @@ import {
   PayPalApiError,
 } from "./payouts/paypal";
 import {
+  getTremendousReward,
+  TremendousApiError,
+} from "./rewards/tremendous";
+import {
   getRuntimeEnv,
-  requireLiveEnv,
+  requireActiveLiveEnv,
+  type ActiveLiveRuntimeEnv,
   type LiveRuntimeEnv,
   type RuntimeEnv,
 } from "./runtime-env";
@@ -38,6 +45,7 @@ type ProcessorDependencies = {
   getFundingCapture?: typeof getPayPalFundingCapture;
   createPayout?: typeof createPayPalFiveDollarPayout;
   getPayoutBatch?: typeof getPayPalPayoutBatch;
+  getGiftCardReward?: typeof getTremendousReward;
 };
 
 export type ProcessLiveJobResult =
@@ -115,6 +123,19 @@ function classifyError(error: unknown) {
         error.status >= 500,
     };
   }
+  if (error instanceof TremendousApiError) {
+    const retryable =
+      error.providerCode === "MALFORMED_RESPONSE" ||
+      error.status === 408 ||
+      error.status === 409 ||
+      error.status === 429 ||
+      error.status >= 500;
+    return {
+      code: `tremendous_${error.operation}_${error.providerCode ?? error.status}`,
+      message: error.message,
+      retryable,
+    };
+  }
   if (error instanceof TypeError) {
     return { code: "network_error", message: "A provider network request failed.", retryable: true };
   }
@@ -130,7 +151,7 @@ function classifyError(error: unknown) {
 
 async function requireSettledFunding(
   job: LiveJobRow,
-  runtime: LiveRuntimeEnv,
+  runtime: ActiveLiveRuntimeEnv,
   dependencies: ProcessorDependencies,
 ): Promise<FundedTaskRow> {
   const task = await taskForLiveJob(job, runtime);
@@ -138,6 +159,65 @@ async function requireSettledFunding(
     throw new ProcessorError(
       "funding_ledger_missing",
       "The task no longer has a settled funding receipt.",
+      false,
+    );
+  }
+
+  if (job.payout_method === "gift_card") {
+    if (runtime.REWARD_PROVIDER !== "tremendous") {
+      throw new ProcessorError(
+        "gift_card_provider_mismatch",
+        "The live reward provider does not match the reserved gift card.",
+        false,
+      );
+    }
+    const record = await giftCardRewardForTask(task.id, runtime);
+    if (
+      !record ||
+      record.order_id !== task.funding_capture_id ||
+      !["ISSUED", "DELIVERY_PENDING", "DELIVERED"].includes(record.status)
+    ) {
+      throw new ProcessorError(
+        "gift_card_ledger_missing",
+        "The funded task no longer has an active gift-card reward.",
+        false,
+      );
+    }
+    const getReward = dependencies.getGiftCardReward ?? getTremendousReward;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const reward = await getReward({
+        apiKey: runtime.TREMENDOUS_API_KEY,
+        rewardId: record.reward_id,
+        signal: controller.signal,
+        ...(runtime.TREMENDOUS_API_BASE_URL
+          ? { baseUrl: runtime.TREMENDOUS_API_BASE_URL }
+          : { environment: runtime.TREMENDOUS_MODE }),
+      });
+      if (
+        reward.orderId !== record.order_id ||
+        reward.valueCents !== 500 ||
+        reward.currency !== "USD" ||
+        reward.deliveryMethod !== "LINK" ||
+        reward.deliveryStatus !== "SUCCEEDED"
+      ) {
+        throw new ProcessorError(
+          "gift_card_no_longer_funded",
+          "The pre-issued $5 reward no longer matches the task contract.",
+          false,
+        );
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    return task;
+  }
+
+  if (runtime.REWARD_PROVIDER !== "paypal") {
+    throw new ProcessorError(
+      "paypal_provider_mismatch",
+      "The live reward provider does not match the reserved PayPal task.",
       false,
     );
   }
@@ -181,7 +261,7 @@ async function requireSettledFunding(
 
 async function runEarningStep(
   job: LiveJobRow,
-  runtime: LiveRuntimeEnv,
+  runtime: ActiveLiveRuntimeEnv,
   dependencies: ProcessorDependencies,
 ) {
   const task = await requireSettledFunding(job, runtime, dependencies);
@@ -230,7 +310,7 @@ async function runEarningStep(
 
 async function runPayoutStep(
   job: LiveJobRow,
-  runtime: LiveRuntimeEnv,
+  runtime: ActiveLiveRuntimeEnv,
   dependencies: ProcessorDependencies,
 ) {
   if (job.earned_cents < 500) {
@@ -246,6 +326,19 @@ async function runPayoutStep(
     throw new ProcessorError(
       "task_not_accepted",
       "The sponsor task is not accepted for payout.",
+      false,
+    );
+  }
+
+  if (job.payout_method === "gift_card") {
+    const queued = await markGiftCardDeliveryPending({ job, runtime });
+    return queued ? "payout_pending" as const : "state_changed" as const;
+  }
+
+  if (runtime.REWARD_PROVIDER !== "paypal") {
+    throw new ProcessorError(
+      "paypal_provider_mismatch",
+      "The live reward provider does not match the payout request.",
       false,
     );
   }
@@ -335,7 +428,7 @@ export async function processLiveJob(
     dependencies?: ProcessorDependencies;
   } = {},
 ): Promise<ProcessLiveJobResult> {
-  const runtime = requireLiveEnv(options.runtime ?? getRuntimeEnv());
+  const runtime = requireActiveLiveEnv(options.runtime ?? getRuntimeEnv());
   const job = await claimLiveJob(requestedJobId, runtime);
   if (!job) return { processed: false, reason: "no_work" };
 

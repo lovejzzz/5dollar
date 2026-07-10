@@ -13,17 +13,17 @@ test("defines the complete FIVE product experience", async () => {
     readFile(new URL(".openai/hosting.json", root), "utf8"),
   ]);
 
-  assert.match(page, /FIVE — Your next \$5, handled/);
-  assert.match(app, /Your next \$5,/);
-  assert.match(app, /Get me \$5/);
-  assert.match(app, /Where should we send it\?/);
-  assert.match(app, /Payout method: PayPal/);
-  assert.match(app, /JSON\.stringify\(\{ payoutMethod: "paypal", destination \}\)/);
+  assert.match(page, /FIVE — Your next \$5 gift card, handled/);
+  assert.match(app, /Your next \$5 gift card,/);
+  assert.match(app, /Get me a \$5 gift card/);
+  assert.match(app, /Email for delivery/);
+  assert.match(app, /Reward method: digital gift card/);
+  assert.match(app, /JSON\.stringify\(\{ payoutMethod: "gift_card", destination \}\)/);
   assert.doesNotMatch(app, /id="payout-method"/);
   assert.doesNotMatch(app, /type="checkbox"/);
   assert.match(app, /SANDBOX PREVIEW/);
-  assert.match(app, /No real money is earned or sent/);
-  assert.match(app, /PAYOUT CONFIRMED/);
+  assert.match(app, /No real task or gift card is created/);
+  assert.match(app, /GIFT CARD DELIVERED/);
   assert.match(app, /funded task inventory/i);
   assert.match(app, /What Five will/);
   assert.match(app, /aria-live/);
@@ -78,7 +78,7 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
   assert.match(statusRoute, /export async function GET/);
   assert.match(jobs, /crypto\.subtle\.digest/);
   assert.match(jobs, /maskDestination/);
-  assert.match(jobs, /No task or payment was created/);
+  assert.match(jobs, /No task or gift card was created/);
   assert.match(migrations, /CREATE TABLE `jobs`/);
   assert.match(migrations, /CREATE TABLE `job_events`/);
   assert.match(migrations, /CREATE TABLE `funded_tasks`/);
@@ -90,6 +90,7 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
   assert.match(migrations, /CREATE TABLE `paypal_funding_webhook_events`/);
   assert.match(migrations, /CREATE TABLE `resend_webhook_events`/);
   assert.match(migrations, /CREATE TABLE `sponsor_task_orders`/);
+  assert.match(migrations, /CREATE TABLE `gift_card_rewards`/);
   assert.match(processor, /earned_cents < 500/);
   assert.match(processor, /createPayPalFiveDollarPayout/);
   assert.match(webhook, /verifyPayPalWebhookSignature/);

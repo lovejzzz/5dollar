@@ -9,10 +9,11 @@
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs && tsx --test tests/live-contract.test.ts tests/migrations.test.ts tests/sponsor-api.test.ts && NODE_OPTIONS='--import=./tests/helpers/cloudflare-register.mjs' tsx --test tests/live-state.test.ts tests/live-canary.test.ts tests/resend-webhook-route.test.ts tests/sponsor-state.test.ts tests/sponsor-process.test.ts",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && tsx --test tests/live-contract.test.ts tests/migrations.test.ts tests/sponsor-api.test.ts tests/relay.test.ts tests/tremendous-contract.test.ts && NODE_OPTIONS='--import=./tests/helpers/cloudflare-register.mjs' tsx --test tests/live-state.test.ts tests/live-canary.test.ts tests/resend-webhook-route.test.ts tests/sponsor-state.test.ts tests/sponsor-process.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
-    "verify:live-canary": "node scripts/verify-live-canary.mjs"
+    "verify:live-canary": "node scripts/verify-live-canary.mjs",
+    "relay:deploy": "wrangler deploy --config relay/wrangler.jsonc"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",

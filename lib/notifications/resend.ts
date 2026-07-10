@@ -1,3 +1,5 @@
+import type { ResendNotificationKind } from "../resend-webhooks";
+
 export class NotificationApiError extends Error {
   readonly status: number;
   readonly providerCode: string | null;
@@ -17,7 +19,8 @@ type SendPayoutNotificationInput = {
   requestCode: string;
   payoutReference: string;
   idempotencyKey: string;
-  kind: "payout_arrived" | "payout_reversed";
+  kind: ResendNotificationKind;
+  redemptionLink?: string;
   fetcher?: typeof fetch;
   baseUrl?: string;
   signal?: AbortSignal;
@@ -57,6 +60,20 @@ export async function sendPayoutArrivalNotification(
 
   const fetcher = input.fetcher ?? fetch;
   const reversed = input.kind === "payout_reversed";
+  const giftCard = input.kind === "gift_card_ready";
+  let redemptionLink: string | null = null;
+  if (giftCard) {
+    const url = new URL(required(input.redemptionLink ?? "", "Gift-card redemption link"));
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      !(url.hostname === "tremendous.com" || url.hostname.endsWith(".tremendous.com"))
+    ) {
+      throw new Error("Gift-card redemption link is invalid.");
+    }
+    redemptionLink = url.toString();
+  }
   const response = await fetcher(endpoint(input.baseUrl), {
     method: "POST",
     headers: {
@@ -67,18 +84,35 @@ export async function sendPayoutArrivalNotification(
     body: JSON.stringify({
       from,
       to: [to],
-      subject: reversed ? "Important: your $5 payout was reversed" : "Your $5 has arrived",
-      text: (reversed
+      subject: giftCard
+        ? "Your $5 gift card is ready"
+        : reversed
+          ? "Important: your $5 payout was reversed"
+          : "Your $5 has arrived",
+      text: (giftCard
         ? [
-            "PayPal later reported that your $5 payout was returned or refunded.",
-            "The payout may previously have appeared successful. Support must review it before any further action.",
+            "Five completed the funded task and your $5 gift card is ready.",
+            `Redeem it: ${redemptionLink}`,
+            "Treat this link like cash. Anyone with the link may be able to redeem the reward.",
           ]
-        : ["PayPal confirmed that your individual $5 payout succeeded."]
-      ).concat([
-        `Request: ${input.requestCode}`,
-        `PayPal reference: ${input.payoutReference}`,
-        "If you do not recognize this request, reply to this message for support.",
-      ]).join("\n\n"),
+        : reversed
+          ? [
+              "PayPal later reported that your $5 payout was returned or refunded.",
+              "The payout may previously have appeared successful. Support must review it before any further action.",
+            ]
+          : ["PayPal confirmed that your individual $5 payout succeeded."]
+      ).concat(
+        giftCard
+          ? [
+              `Request: ${input.requestCode}`,
+              "If you do not recognize this request, reply to this message for support.",
+            ]
+          : [
+              `Request: ${input.requestCode}`,
+              `PayPal reference: ${input.payoutReference}`,
+              "If you do not recognize this request, reply to this message for support.",
+            ],
+      ).join("\n\n"),
       tags: [{ name: "category", value: input.kind }],
     }),
     signal: input.signal,

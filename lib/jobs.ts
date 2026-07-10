@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 
 export const PAYOUT_METHODS = [
+  "gift_card",
   "paypal",
   "zelle",
   "cashapp",
@@ -76,13 +77,13 @@ const STEP_DEFINITIONS: ReadonlyArray<{
   {
     status: "received",
     title: "Request received",
-    detail: "Payout destination masked and request queued.",
+    detail: "Delivery email masked and request queued.",
     afterMs: 0,
   },
   {
     status: "matching",
-    title: "Finding an opportunity",
-    detail: "Demo agent is scanning the approved task inventory.",
+    title: "Finding a funded task",
+    detail: "Demo agent is scanning pre-funded, automation-safe task inventory.",
     afterMs: 1_600,
   },
   {
@@ -99,19 +100,20 @@ const STEP_DEFINITIONS: ReadonlyArray<{
   },
   {
     status: "payout_preview",
-    title: "Preparing the payout",
-    detail: "Demo payout details are being assembled.",
+    title: "Preparing the gift card",
+    detail: "Demo gift-card delivery details are being assembled.",
     afterMs: 9_700,
   },
   {
     status: "complete",
     title: "Demo complete",
-    detail: "The workflow finished. No task or payment was created.",
+    detail: "The workflow finished. No task or gift card was created.",
     afterMs: 12_200,
   },
 ];
 
 const METHOD_LABELS: Record<PayoutMethod, string> = {
+  gift_card: "$5 digital gift card",
   paypal: "PayPal",
   zelle: "Zelle",
   cashapp: "Cash App",
@@ -168,15 +170,17 @@ export function isPayoutMethod(value: string): value is PayoutMethod {
 
 export function validateDestination(method: PayoutMethod, value: string) {
   const destination = value.trim();
-  if (!destination) return "Enter a payout destination.";
-  if (destination.length > 120) return "That payout destination is too long.";
+  if (!destination) return method === "gift_card" ? "Enter a delivery email." : "Enter a payout destination.";
+  if (destination.length > 120) return "That destination is too long.";
 
   const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const phone = /^\+?[\d\s().-]{7,22}$/;
   const handle = /^@?[a-zA-Z0-9._-]{2,40}$/;
 
   const valid =
-    method === "paypal"
+    method === "gift_card"
+      ? email.test(destination)
+      : method === "paypal"
       ? email.test(destination) || phone.test(destination) || handle.test(destination)
       : method === "zelle"
         ? email.test(destination) || phone.test(destination)
@@ -186,7 +190,11 @@ export function validateDestination(method: PayoutMethod, value: string) {
             ? handle.test(destination)
             : destination.length >= 3;
 
-  return valid ? null : "Check that destination and try again.";
+  return valid
+    ? null
+    : method === "gift_card"
+      ? "Enter a valid email address."
+      : "Check that destination and try again.";
 }
 
 function normalizeDestination(method: PayoutMethod, value: string) {
@@ -234,7 +242,7 @@ function statusCopy(status: JobStatus) {
     case "received":
       return {
         headline: "Request locked in.",
-        message: "The demo agent is getting ready to look for a funded task.",
+        message: "The demo agent is getting ready to look for a pre-funded $5 task.",
       };
     case "matching":
       return {
@@ -249,17 +257,17 @@ function statusCopy(status: JobStatus) {
     case "verifying":
       return {
         headline: "Checking every detail.",
-        message: "A live job would need to be accepted and settled before payout.",
+        message: "A live job must be accepted before its pre-funded gift card can be released.",
       };
     case "payout_preview":
       return {
-        headline: "Building the payout preview.",
-        message: "A real provider receipt would be required before calling this paid.",
+        headline: "Preparing the gift card.",
+        message: "A live delivery would use a fresh, provider-hosted redemption link sent by email.",
       };
     case "complete":
       return {
         headline: "Demo complete.",
-        message: "The full workflow ran, but no real task or payment was created.",
+        message: "The full workflow ran, but no real task or gift card was created.",
       };
   }
 }
