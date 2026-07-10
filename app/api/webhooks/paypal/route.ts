@@ -1,5 +1,5 @@
 import { waitUntil } from "cloudflare:workers";
-import { applyPayPalPayoutWebhook } from "../../../../lib/live-jobs";
+import { applyPayPalWebhook } from "../../../../lib/live-jobs";
 import { drainNotifications } from "../../../../lib/process-notification";
 import {
   getPayPalAccessToken,
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
     if (!verification.signatureVerified) {
       return Response.json({ error: "Webhook signature verification failed." }, { status: 400 });
     }
-    const result = await applyPayPalPayoutWebhook(rawEvent, runtime);
+    const result = await applyPayPalWebhook(rawEvent, runtime);
     waitUntil(drainNotifications(1, { runtime }).catch(() => undefined));
     return Response.json({ received: true, ...result });
   } catch {

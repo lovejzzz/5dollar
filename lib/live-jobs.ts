@@ -5,6 +5,7 @@ import {
   fingerprintPayoutDestination,
 } from "./crypto";
 import { validateFundedTaskSpec, type ValidatedFundedTask } from "./funded-tasks";
+import { parsePayPalFundingTerminalWebhook } from "./paypal-webhooks";
 import type { PayPalFundingCapture, PayPalPayoutBatchObservation } from "./payouts/paypal";
 import { getRuntimeEnv, type RuntimeEnv } from "./runtime-env";
 
@@ -62,7 +63,7 @@ export type FundedTaskRow = {
   acceptance_json: string;
   sponsor_reference: string;
   funding_receipt_id: string;
-  status: "available" | "leased" | "accepted" | "rejected";
+  status: "available" | "leased" | "accepted" | "rejected" | "funding_reversed";
   lease_job_id: string | null;
   created_at: number;
   updated_at: number;
@@ -74,6 +75,15 @@ export type FundedTaskRow = {
   funding_gross_cents: number;
   funding_net_cents: number;
 };
+
+export class FundingCaptureTerminalError extends Error {
+  constructor() {
+    super(
+      "PayPal already reported this sponsor funding capture as terminal; task activation is blocked.",
+    );
+    this.name = "FundingCaptureTerminalError";
+  }
+}
 
 export type PayoutRow = {
   id: string;
@@ -319,6 +329,22 @@ export async function ensureLiveDatabase(runtime: RuntimeEnv = getRuntimeEnv()) 
     db.prepare(
       "CREATE INDEX IF NOT EXISTS paypal_webhook_events_payout_idx ON paypal_webhook_events (payout_id)",
     ),
+    db.prepare(`CREATE TABLE IF NOT EXISTS paypal_funding_webhook_events (
+      event_id TEXT PRIMARY KEY NOT NULL,
+      event_type TEXT NOT NULL,
+      funding_receipt_id TEXT,
+      capture_id TEXT NOT NULL,
+      terminal_status TEXT NOT NULL,
+      provider_event_time INTEGER NOT NULL,
+      received_at INTEGER NOT NULL,
+      applied_at INTEGER
+    )`),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS paypal_funding_webhook_events_capture_idx ON paypal_funding_webhook_events (capture_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS paypal_funding_webhook_events_receipt_idx ON paypal_funding_webhook_events (funding_receipt_id)",
+    ),
     db.prepare(`CREATE TABLE IF NOT EXISTS notification_outbox (
       id TEXT PRIMARY KEY NOT NULL,
       event_key TEXT NOT NULL,
@@ -341,6 +367,78 @@ export async function ensureLiveDatabase(runtime: RuntimeEnv = getRuntimeEnv()) 
     ),
     db.prepare(
       "CREATE INDEX IF NOT EXISTS notification_outbox_delivery_idx ON notification_outbox (status, next_attempt_at, lease_expires_at)",
+    ),
+    db.prepare(`CREATE TABLE IF NOT EXISTS sponsor_order_request_limits (
+      owner_email TEXT PRIMARY KEY NOT NULL,
+      window_started_at INTEGER NOT NULL,
+      request_count INTEGER NOT NULL DEFAULT 1 CHECK (request_count >= 1),
+      updated_at INTEGER NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS sponsor_task_orders (
+      id TEXT PRIMARY KEY NOT NULL,
+      owner_email TEXT NOT NULL,
+      client_request_id TEXT NOT NULL,
+      request_hash TEXT NOT NULL,
+      task_type TEXT NOT NULL DEFAULT 'dataset_summary'
+        CHECK (task_type = 'dataset_summary'),
+      title TEXT NOT NULL,
+      instructions TEXT NOT NULL,
+      input_json TEXT NOT NULL,
+      acceptance_json TEXT NOT NULL,
+      min_answer_chars INTEGER NOT NULL DEFAULT 120,
+      automation_allowed INTEGER NOT NULL DEFAULT 0,
+      auto_accept INTEGER NOT NULL DEFAULT 0,
+      rights_attested INTEGER NOT NULL DEFAULT 0,
+      no_sensitive_data INTEGER NOT NULL DEFAULT 0,
+      attestation_version TEXT NOT NULL,
+      attested_at INTEGER NOT NULL,
+      sponsor_reference TEXT NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'USD' CHECK (currency = 'USD'),
+      gross_cents INTEGER NOT NULL DEFAULT 800 CHECK (gross_cents = 800),
+      minimum_net_cents INTEGER NOT NULL DEFAULT 600 CHECK (minimum_net_cents >= 600),
+      payout_cents INTEGER NOT NULL DEFAULT 500 CHECK (payout_cents = 500),
+      paypal_order_id TEXT,
+      paypal_capture_id TEXT,
+      funded_task_id TEXT,
+      status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'order_created', 'capture_pending', 'capture_retry', 'funded', 'canceled', 'needs_review')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER,
+      lease_token TEXT,
+      lease_expires_at INTEGER,
+      last_error_code TEXT,
+      last_error_message TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      CHECK (automation_allowed = 1 AND auto_accept = 1),
+      CHECK (rights_attested = 1 AND no_sensitive_data = 1),
+      CHECK (status <> 'funded' OR (
+        paypal_order_id IS NOT NULL AND paypal_capture_id IS NOT NULL AND
+        funded_task_id IS NOT NULL AND completed_at IS NOT NULL
+      )),
+      FOREIGN KEY (funded_task_id) REFERENCES funded_tasks(id)
+    )`),
+    db.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS sponsor_task_orders_owner_request_idx ON sponsor_task_orders (owner_email, client_request_id)",
+    ),
+    db.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS sponsor_task_orders_reference_idx ON sponsor_task_orders (sponsor_reference)",
+    ),
+    db.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS sponsor_task_orders_paypal_order_idx ON sponsor_task_orders (paypal_order_id)",
+    ),
+    db.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS sponsor_task_orders_paypal_capture_idx ON sponsor_task_orders (paypal_capture_id)",
+    ),
+    db.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS sponsor_task_orders_funded_task_idx ON sponsor_task_orders (funded_task_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS sponsor_task_orders_owner_created_idx ON sponsor_task_orders (owner_email, created_at)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS sponsor_task_orders_capture_idx ON sponsor_task_orders (status, next_attempt_at, lease_expires_at)",
     ),
   ]);
   return db;
@@ -640,6 +738,20 @@ export async function getLiveJobForOwner(
   return job ? publicLiveJob(db, job) : null;
 }
 
+async function terminalFundingEventForCapture(
+  db: D1Database,
+  captureId: string,
+) {
+  return db
+    .prepare(
+      `SELECT event_id, terminal_status
+       FROM paypal_funding_webhook_events
+       WHERE capture_id = ? LIMIT 1`,
+    )
+    .bind(captureId)
+    .first<{ event_id: string; terminal_status: string }>();
+}
+
 export async function createFundedTask(
   rawSpec: unknown,
   fundingCapture: PayPalFundingCapture,
@@ -666,8 +778,11 @@ export async function createFundedTask(
   const now = Date.now();
   const id = crypto.randomUUID();
   const receiptId = `paypal:${fundingCapture.captureId}`;
+  if (await terminalFundingEventForCapture(db, fundingCapture.captureId)) {
+    throw new FundingCaptureTerminalError();
+  }
   try {
-    await db.batch([
+    const inserted = await db.batch([
       db
         .prepare(
           `INSERT INTO funded_tasks
@@ -675,7 +790,10 @@ export async function createFundedTask(
             payout_cents, automation_allowed, auto_accept, min_answer_chars,
             acceptance_json, sponsor_reference, funding_receipt_id, status,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 500, 1, 1, ?, ?, ?, ?, 'available', ?, ?)`,
+           SELECT ?, ?, ?, ?, ?, ?, 500, 1, 1, ?, ?, ?, ?, 'available', ?, ?
+           WHERE NOT EXISTS (
+             SELECT 1 FROM paypal_funding_webhook_events WHERE capture_id = ?
+           )`,
         )
         .bind(
           id,
@@ -690,13 +808,20 @@ export async function createFundedTask(
           receiptId,
           now,
           now,
+          fundingCapture.captureId,
         ),
       db
         .prepare(
           `INSERT INTO funding_receipts
            (id, provider, provider_transaction_id, sponsor_reference, currency,
             gross_cents, net_cents, status, captured_at, task_id, created_at)
-           VALUES (?, 'paypal', ?, ?, 'USD', ?, ?, 'COMPLETED', ?, ?, ?)`,
+           SELECT ?, 'paypal', ?, ?, 'USD', ?, ?, 'COMPLETED', ?, ?, ?
+           WHERE EXISTS (
+             SELECT 1 FROM funded_tasks
+             WHERE id = ? AND funding_receipt_id = ?
+           ) AND NOT EXISTS (
+             SELECT 1 FROM paypal_funding_webhook_events WHERE capture_id = ?
+           )`,
         )
         .bind(
           receiptId,
@@ -707,20 +832,82 @@ export async function createFundedTask(
           capturedAt,
           id,
           now,
+          id,
+          receiptId,
+          fundingCapture.captureId,
         ),
     ]);
+    if (
+      (inserted[0]?.meta.changes ?? 0) !== 1 ||
+      (inserted[1]?.meta.changes ?? 0) !== 1
+    ) {
+      if (await terminalFundingEventForCapture(db, fundingCapture.captureId)) {
+        throw new FundingCaptureTerminalError();
+      }
+      throw new Error("The funded task and receipt were not recorded atomically.");
+    }
   } catch (error) {
     const existing = await db
       .prepare(
-        `SELECT ft.id, ft.sponsor_reference, ft.status
+        `SELECT ft.id, ft.task_type, ft.title, ft.instructions, ft.input_json,
+                ft.reward_cents, ft.payout_cents, ft.automation_allowed,
+                ft.auto_accept, ft.min_answer_chars, ft.acceptance_json,
+                ft.sponsor_reference, ft.funding_receipt_id, ft.status,
+                fr.currency AS receipt_currency,
+                fr.gross_cents AS receipt_gross_cents,
+                fr.net_cents AS receipt_net_cents,
+                fr.status AS receipt_status,
+                fr.captured_at AS receipt_captured_at
          FROM funding_receipts fr
          JOIN funded_tasks ft ON ft.id = fr.task_id
          WHERE fr.provider = 'paypal' AND fr.provider_transaction_id = ?
            AND fr.sponsor_reference = ? LIMIT 1`,
       )
       .bind(fundingCapture.captureId, spec.sponsorReference)
-      .first<{ id: string; sponsor_reference: string; status: string }>();
+      .first<{
+        id: string;
+        task_type: string;
+        title: string;
+        instructions: string;
+        input_json: string;
+        reward_cents: number;
+        payout_cents: number;
+        automation_allowed: number;
+        auto_accept: number;
+        min_answer_chars: number;
+        acceptance_json: string;
+        sponsor_reference: string;
+        funding_receipt_id: string;
+        status: string;
+        receipt_currency: string;
+        receipt_gross_cents: number;
+        receipt_net_cents: number;
+        receipt_status: string;
+        receipt_captured_at: number;
+      }>();
     if (existing) {
+      const exactContract =
+        existing.task_type === spec.taskType &&
+        existing.title === spec.title &&
+        existing.instructions === spec.instructions &&
+        existing.input_json === spec.inputJson &&
+        existing.reward_cents === spec.rewardCents &&
+        existing.payout_cents === spec.payoutCents &&
+        existing.automation_allowed === spec.automationAllowed &&
+        existing.auto_accept === spec.autoAccept &&
+        existing.min_answer_chars === spec.minAnswerChars &&
+        existing.acceptance_json === spec.acceptanceJson &&
+        existing.funding_receipt_id === receiptId &&
+        existing.receipt_currency === fundingCapture.currency &&
+        existing.receipt_gross_cents === fundingCapture.grossCents &&
+        existing.receipt_net_cents === fundingCapture.netCents &&
+        existing.receipt_status === fundingCapture.status &&
+        existing.receipt_captured_at === capturedAt;
+      if (!exactContract) {
+        throw new Error(
+          "This PayPal capture is already bound to a different immutable task contract.",
+        );
+      }
       return {
         id: existing.id,
         sponsorReference: existing.sponsor_reference,
@@ -1427,6 +1614,293 @@ function stringField(value: unknown, max = 160) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
+type FundingReceiptWebhookRow = {
+  id: string;
+  task_id: string;
+  status: string;
+};
+
+type FundingWebhookEventRow = {
+  event_type: string;
+  funding_receipt_id: string | null;
+  capture_id: string;
+  terminal_status: string;
+  provider_event_time: number;
+  applied_at: number | null;
+};
+
+export async function applyPayPalFundingWebhook(
+  rawEvent: string,
+  runtime: RuntimeEnv = getRuntimeEnv(),
+) {
+  const parsed = parsePayPalFundingTerminalWebhook(rawEvent);
+  if (!parsed) return { handled: false, reason: "unsupported_event" as const };
+
+  const db = await ensureLiveDatabase(runtime);
+  const existing = await db
+    .prepare(
+      `SELECT event_type, funding_receipt_id, capture_id, terminal_status,
+              provider_event_time, applied_at
+       FROM paypal_funding_webhook_events WHERE event_id = ? LIMIT 1`,
+    )
+    .bind(parsed.eventId)
+    .first<FundingWebhookEventRow>();
+  if (
+    existing &&
+    (existing.event_type !== parsed.eventType ||
+      existing.capture_id !== parsed.captureId ||
+      existing.terminal_status !== parsed.terminalStatus ||
+      existing.provider_event_time !== parsed.providerEventTime)
+  ) {
+    throw new Error("PayPal funding webhook event conflicts with the durable ledger.");
+  }
+
+  // Persist the verified terminal event before looking for its receipt. D1
+  // serializes this write against receipt creation: either the event wins and
+  // fences creation, or the receipt wins and is found below for immediate
+  // reversal. An early webhook is therefore never acknowledged and forgotten.
+  const now = Date.now();
+  const inserted = await db
+    .prepare(
+      `INSERT OR IGNORE INTO paypal_funding_webhook_events
+       (event_id, event_type, funding_receipt_id, capture_id, terminal_status,
+        provider_event_time, received_at)
+       VALUES (?, ?, NULL, ?, ?, ?, ?)`,
+    )
+    .bind(
+      parsed.eventId,
+      parsed.eventType,
+      parsed.captureId,
+      parsed.terminalStatus,
+      parsed.providerEventTime,
+      now,
+    )
+    .run();
+  const durableEvent = await db
+    .prepare(
+      `SELECT event_type, funding_receipt_id, capture_id, terminal_status,
+              provider_event_time, applied_at
+       FROM paypal_funding_webhook_events WHERE event_id = ? LIMIT 1`,
+    )
+    .bind(parsed.eventId)
+    .first<FundingWebhookEventRow>();
+  if (
+    !durableEvent ||
+    durableEvent.event_type !== parsed.eventType ||
+    durableEvent.capture_id !== parsed.captureId ||
+    durableEvent.terminal_status !== parsed.terminalStatus ||
+    durableEvent.provider_event_time !== parsed.providerEventTime
+  ) {
+    throw new Error("PayPal funding webhook event conflicts with the durable ledger.");
+  }
+
+  const receipt = await db
+    .prepare(
+      `SELECT id, task_id, status FROM funding_receipts
+       WHERE provider = 'paypal' AND provider_transaction_id = ? LIMIT 1`,
+    )
+    .bind(parsed.captureId)
+    .first<FundingReceiptWebhookRow>();
+  if (!receipt) {
+    return {
+      handled: true,
+      duplicate: (inserted.meta.changes ?? 0) === 0,
+      pendingReceipt: true,
+      captureId: parsed.captureId,
+    };
+  }
+  if (
+    durableEvent.funding_receipt_id &&
+    durableEvent.funding_receipt_id !== receipt.id
+  ) {
+    throw new Error("PayPal funding webhook event conflicts with the durable ledger.");
+  }
+
+  await db
+    .prepare(
+      `UPDATE paypal_funding_webhook_events
+       SET funding_receipt_id = COALESCE(funding_receipt_id, ?)
+       WHERE event_id = ? AND event_type = ? AND capture_id = ?
+         AND terminal_status = ? AND provider_event_time = ?
+         AND (funding_receipt_id IS NULL OR funding_receipt_id = ?)`,
+    )
+    .bind(
+      receipt.id,
+      parsed.eventId,
+      parsed.eventType,
+      parsed.captureId,
+      parsed.terminalStatus,
+      parsed.providerEventTime,
+      receipt.id,
+    )
+    .run();
+  const boundEvent = await db
+    .prepare(
+      `SELECT event_type, funding_receipt_id, capture_id, terminal_status,
+              provider_event_time, applied_at
+       FROM paypal_funding_webhook_events WHERE event_id = ? LIMIT 1`,
+    )
+    .bind(parsed.eventId)
+    .first<FundingWebhookEventRow>();
+  if (!boundEvent || boundEvent.funding_receipt_id !== receipt.id) {
+    throw new Error("PayPal funding webhook event conflicts with the durable ledger.");
+  }
+  if (boundEvent.applied_at !== null) {
+    return {
+      handled: true,
+      duplicate: true,
+      captureId: parsed.captureId,
+      receiptStatus: receipt.status,
+      taskId: receipt.task_id,
+    };
+  }
+
+  const terminalMessage = `PayPal reported the sponsor funding capture as ${parsed.terminalStatus}. Automatic work and payout stopped before a confirmed claimant payment.`;
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE funding_receipts SET status = ?
+         WHERE id = ? AND status NOT IN ('REFUNDED', 'REVERSED', 'DENIED')
+           AND EXISTS (
+             SELECT 1 FROM paypal_funding_webhook_events
+             WHERE event_id = ? AND event_type = ? AND funding_receipt_id = ?
+               AND capture_id = ? AND terminal_status = ? AND applied_at IS NULL
+           )`,
+      )
+      .bind(
+        parsed.terminalStatus,
+        receipt.id,
+        parsed.eventId,
+        parsed.eventType,
+        receipt.id,
+        parsed.captureId,
+        parsed.terminalStatus,
+      ),
+    db
+      .prepare(
+        `UPDATE funded_tasks SET status = 'funding_reversed', updated_at = ?
+         WHERE id = ? AND status <> 'funding_reversed'
+           AND EXISTS (
+             SELECT 1 FROM paypal_funding_webhook_events
+             WHERE event_id = ? AND event_type = ? AND funding_receipt_id = ?
+               AND capture_id = ? AND terminal_status = ? AND applied_at IS NULL
+           )`,
+      )
+      .bind(
+        now,
+        receipt.task_id,
+        parsed.eventId,
+        parsed.eventType,
+        receipt.id,
+        parsed.captureId,
+        parsed.terminalStatus,
+      ),
+    db
+      .prepare(
+        `UPDATE sponsor_task_orders
+         SET status = 'needs_review', next_attempt_at = NULL,
+             lease_token = NULL, lease_expires_at = NULL,
+             last_error_code = 'funding_reversed',
+             last_error_message = ?, updated_at = ?
+         WHERE funded_task_id = ? AND status = 'funded'
+           AND EXISTS (
+             SELECT 1 FROM paypal_funding_webhook_events
+             WHERE event_id = ? AND event_type = ? AND funding_receipt_id = ?
+               AND capture_id = ? AND terminal_status = ? AND applied_at IS NULL
+           )`,
+      )
+      .bind(
+        terminalMessage,
+        now,
+        receipt.task_id,
+        parsed.eventId,
+        parsed.eventType,
+        receipt.id,
+        parsed.captureId,
+        parsed.terminalStatus,
+      ),
+    db
+      .prepare(
+        `UPDATE live_jobs
+         SET status = 'failed', lease_token = NULL, lease_expires_at = NULL,
+             next_attempt_at = NULL, last_error_code = 'funding_reversed',
+             last_error_message = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?)
+         WHERE task_id = ? AND status NOT IN ('paid', 'reversed')
+           AND EXISTS (
+             SELECT 1 FROM paypal_funding_webhook_events
+             WHERE event_id = ? AND event_type = ? AND funding_receipt_id = ?
+               AND capture_id = ? AND terminal_status = ? AND applied_at IS NULL
+           )`,
+      )
+      .bind(
+        terminalMessage,
+        now,
+        now,
+        receipt.task_id,
+        parsed.eventId,
+        parsed.eventType,
+        receipt.id,
+        parsed.captureId,
+        parsed.terminalStatus,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO live_job_events
+         (event_key, job_id, kind, title, detail, created_at)
+         SELECT 'job:' || id || ':funding-event:' || ?, id, 'funding_reversed',
+                'Sponsor funding is no longer settled',
+                CASE WHEN status = 'paid'
+                  THEN 'The sponsor capture later became terminal; the already confirmed claimant payout remains recorded.'
+                  WHEN status = 'reversed'
+                  THEN 'The sponsor capture later became terminal; the existing claimant payout reversal remains recorded.'
+                  ELSE ? END,
+                ?
+         FROM live_jobs WHERE task_id = ?
+           AND EXISTS (
+             SELECT 1 FROM paypal_funding_webhook_events
+             WHERE event_id = ? AND event_type = ? AND funding_receipt_id = ?
+               AND capture_id = ? AND terminal_status = ? AND applied_at IS NULL
+           )`,
+      )
+      .bind(
+        parsed.eventId,
+        terminalMessage,
+        now,
+        receipt.task_id,
+        parsed.eventId,
+        parsed.eventType,
+        receipt.id,
+        parsed.captureId,
+        parsed.terminalStatus,
+      ),
+    db
+      .prepare(
+        `UPDATE paypal_funding_webhook_events SET applied_at = ?
+         WHERE event_id = ? AND event_type = ? AND funding_receipt_id = ?
+           AND capture_id = ? AND terminal_status = ? AND applied_at IS NULL`,
+      )
+      .bind(
+        now,
+        parsed.eventId,
+        parsed.eventType,
+        receipt.id,
+        parsed.captureId,
+        parsed.terminalStatus,
+      ),
+  ]);
+  const updatedReceipt = await db
+    .prepare("SELECT status FROM funding_receipts WHERE id = ? LIMIT 1")
+    .bind(receipt.id)
+    .first<{ status: string }>();
+  return {
+    handled: true,
+    duplicate: (inserted.meta.changes ?? 0) === 0,
+    captureId: parsed.captureId,
+    receiptStatus: updatedReceipt?.status ?? parsed.terminalStatus,
+    taskId: receipt.task_id,
+  };
+}
+
 export async function applyPayPalPayoutWebhook(
   rawEvent: string,
   runtime: RuntimeEnv = getRuntimeEnv(),
@@ -1697,6 +2171,17 @@ export async function applyPayPalPayoutWebhook(
     status: job?.status ?? state.jobStatus,
     jobId: payout.job_id,
   };
+}
+
+export async function applyPayPalWebhook(
+  rawEvent: string,
+  runtime: RuntimeEnv = getRuntimeEnv(),
+) {
+  const fundingResult = await applyPayPalFundingWebhook(rawEvent, runtime);
+  if (fundingResult.handled || fundingResult.reason !== "unsupported_event") {
+    return fundingResult;
+  }
+  return applyPayPalPayoutWebhook(rawEvent, runtime);
 }
 
 export async function claimNotification(

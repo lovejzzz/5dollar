@@ -342,11 +342,11 @@ function AgentCard({ config }: { config: AppConfig }) {
         <span className="mono-label">YOUR PAYOUT</span>
         <span className="fixed-pill">FIXED AMOUNT</span>
       </div>
-      <div className="amount-lockup" aria-label="Five U.S. dollars">
+      <h2 id="request-heading" className="amount-lockup" aria-label="Five U.S. dollars">
         <span className="amount-lockup__currency">$</span>
         <span className="amount-lockup__number">5.00</span>
         <span className="amount-lockup__code">USD</span>
-      </div>
+      </h2>
 
       <form onSubmit={handleSubmit} noValidate>
         <div className="field-group">

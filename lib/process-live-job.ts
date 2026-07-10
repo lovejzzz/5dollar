@@ -12,6 +12,7 @@ import {
   markLiveJobRetry,
   markPayoutPending,
   taskForLiveJob,
+  type FundedTaskRow,
   type LiveJobRow,
 } from "./live-jobs";
 import { submissionPassesAcceptance } from "./funded-tasks";
@@ -127,30 +128,24 @@ function classifyError(error: unknown) {
   };
 }
 
-async function runEarningStep(
+async function requireSettledFunding(
   job: LiveJobRow,
   runtime: LiveRuntimeEnv,
   dependencies: ProcessorDependencies,
-) {
+): Promise<FundedTaskRow> {
   const task = await taskForLiveJob(job, runtime);
   if (!task) {
     throw new ProcessorError(
-      "task_missing",
-      "The reserved funded task could not be loaded.",
-      false,
-    );
-  }
-  if (task.automation_allowed !== 1 || task.status !== "leased") {
-    throw new ProcessorError(
-      "task_not_eligible",
-      "The funded task is not eligible for automated completion.",
+      "funding_ledger_missing",
+      "The task no longer has a settled funding receipt.",
       false,
     );
   }
 
   const target = providerTarget(runtime);
   const getAccessToken = dependencies.getAccessToken ?? getPayPalAccessToken;
-  const getFundingCapture = dependencies.getFundingCapture ?? getPayPalFundingCapture;
+  const getFundingCapture =
+    dependencies.getFundingCapture ?? getPayPalFundingCapture;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
@@ -180,6 +175,22 @@ async function runEarningStep(
     }
   } finally {
     clearTimeout(timer);
+  }
+  return task;
+}
+
+async function runEarningStep(
+  job: LiveJobRow,
+  runtime: LiveRuntimeEnv,
+  dependencies: ProcessorDependencies,
+) {
+  const task = await requireSettledFunding(job, runtime, dependencies);
+  if (task.automation_allowed !== 1 || task.status !== "leased") {
+    throw new ProcessorError(
+      "task_not_eligible",
+      "The funded task is not eligible for automated completion.",
+      false,
+    );
   }
 
   const runTask = dependencies.runTask ?? runOpenAISponsorTask;
@@ -226,6 +237,15 @@ async function runPayoutStep(
     throw new ProcessorError(
       "unearned_payout_blocked",
       "A payout cannot start before at least $5 of task revenue is accepted.",
+      false,
+    );
+  }
+
+  const task = await requireSettledFunding(job, runtime, dependencies);
+  if (task.status !== "accepted") {
+    throw new ProcessorError(
+      "task_not_accepted",
+      "The sponsor task is not accepted for payout.",
       false,
     );
   }

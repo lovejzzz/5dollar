@@ -27,6 +27,9 @@ export interface RuntimeEnv {
   PAYPAL_API_BASE_URL?: string;
   RESEND_API_KEY?: string;
   NOTIFICATION_FROM_EMAIL?: string;
+  SUPPORT_EMAIL?: string;
+  SPONSOR_ALLOWED_EMAILS?: string;
+  SPONSOR_SITE_ORIGIN?: string;
   RESEND_API_BASE_URL?: string;
   PROVIDER_TEST_MODE?: "loopback";
 }
@@ -42,6 +45,7 @@ export const REQUIRED_LIVE_SECRET_NAMES = [
   "PAYPAL_WEBHOOK_ID",
   "RESEND_API_KEY",
   "NOTIFICATION_FROM_EMAIL",
+  "SUPPORT_EMAIL",
 ] as const;
 
 export type RequiredLiveSecretName =
@@ -83,6 +87,32 @@ export function getPayPalMode(
   runtime: RuntimeEnv = getRuntimeEnv(),
 ): PayPalMode {
   return normalizedMode(runtime.PAYPAL_MODE, "PAYPAL_MODE");
+}
+
+/**
+ * Sponsor Checkout is a private beta. An absent allowlist disables new public
+ * sponsor orders without disabling claimant payouts or operator-funded tasks.
+ */
+export function isSponsorAllowed(
+  email: string,
+  runtime: RuntimeEnv = getRuntimeEnv(),
+) {
+  const configured = runtime.SPONSOR_ALLOWED_EMAILS;
+  if (!nonEmptyString(configured)) return false;
+
+  const allowed = configured
+    .split(/[\s,]+/)
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  if (
+    allowed.length === 0 ||
+    allowed.some((value) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))
+  ) {
+    throw new Error(
+      "Cloudflare binding `SPONSOR_ALLOWED_EMAILS` must contain only comma-separated sponsor email addresses.",
+    );
+  }
+  return allowed.includes(email.trim().toLowerCase());
 }
 
 export function requireRuntimeSecret(
@@ -127,6 +157,11 @@ export function requireLiveEnv(
     const names = missing.map((name) => `\`${name}\``).join(", ");
     throw new Error(
       `Live FIVE configuration is incomplete. Missing required Cloudflare secret binding${missing.length === 1 ? "" : "s"}: ${names}.`,
+    );
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(runtime.SUPPORT_EMAIL ?? "")) {
+    throw new Error(
+      "Cloudflare binding `SUPPORT_EMAIL` must be a valid support mailbox before live money is enabled.",
     );
   }
 

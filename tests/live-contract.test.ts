@@ -3,14 +3,19 @@ import test from "node:test";
 import { runOpenAISponsorTask } from "../lib/earnings/openai";
 import { validateFundedTaskSpec } from "../lib/funded-tasks";
 import {
+  capturePayPalFundingOrder,
+  createPayPalFundingOrder,
+  createPayPalFundingOrderIdempotency,
   createPayPalFiveDollarPayout,
   createPayPalPayoutIdempotency,
   getPayPalFundingCapture,
+  getPayPalFundingOrder,
   getPayPalPayoutBatch,
   inferPayPalRecipientType,
   verifyPayPalWebhookSignature,
 } from "../lib/payouts/paypal";
 import { sendPayoutArrivalNotification } from "../lib/notifications/resend";
+import { parsePayPalFundingTerminalWebhook } from "../lib/paypal-webhooks";
 
 test("accepts only genuinely funded, automation-approved sponsor tasks", () => {
   const task = validateFundedTaskSpec({
@@ -130,6 +135,285 @@ test("PayPal capture and payout reads preserve settled funding and item truth", 
   assert.equal(payout.itemStatus, "SUCCESS");
   assert.equal(payout.providerItemId, "PITEM-001");
   assert.equal(requests.length, 2);
+});
+
+test("PayPal funding order creation is retry-stable and exact", async () => {
+  const ids = await createPayPalFundingOrderIdempotency("sponsor-draft-001");
+  assert.deepEqual(
+    ids,
+    await createPayPalFundingOrderIdempotency("sponsor-draft-001"),
+  );
+
+  let body: Record<string, unknown> = {};
+  let requestId = "";
+  const fetcher: typeof fetch = async (input, init) => {
+    assert.equal(String(input), "https://api-m.sandbox.paypal.com/v2/checkout/orders");
+    assert.equal(init?.method, "POST");
+    const headers = new Headers(init?.headers);
+    requestId = headers.get("PayPal-Request-Id") ?? "";
+    assert.equal(headers.get("Prefer"), "return=representation");
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(
+      JSON.stringify({
+        id: "ORDER12345678",
+        status: "PAYER_ACTION_REQUIRED",
+        intent: "CAPTURE",
+        purchase_units: [
+          {
+            reference_id: "default",
+            custom_id: "sponsor:feedback:001",
+            invoice_id: ids.invoiceId,
+            amount: { currency_code: "USD", value: "7.00" },
+          },
+        ],
+        links: [
+          {
+            rel: "payer-action",
+            method: "GET",
+            href: "https://www.sandbox.paypal.com/checkoutnow?token=ORDER12345678",
+          },
+        ],
+      }),
+      { status: 201, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const result = await createPayPalFundingOrder({
+    accessToken: "access-token",
+    stableRequestKey: "sponsor-draft-001",
+    amountCents: 700,
+    customId: "sponsor:feedback:001",
+    returnUrl: "https://five.example/sponsor/complete",
+    cancelUrl: "https://five.example/sponsor?canceled=1",
+    environment: "sandbox",
+    fetcher,
+  });
+  assert.equal(result.orderId, "ORDER12345678");
+  assert.equal(result.approvalUrl, "https://www.sandbox.paypal.com/checkoutnow?token=ORDER12345678");
+  assert.equal(result.invoiceId, ids.invoiceId);
+  assert.equal(result.grossCents, 700);
+  assert.equal(requestId, ids.createRequestId);
+
+  const units = body.purchase_units as Array<Record<string, unknown>>;
+  assert.equal(body.intent, "CAPTURE");
+  assert.equal(units.length, 1);
+  assert.equal(units[0].custom_id, "sponsor:feedback:001");
+  assert.equal(units[0].invoice_id, ids.invoiceId);
+  assert.deepEqual(units[0].amount, { currency_code: "USD", value: "7.00" });
+
+  await assert.rejects(
+    () =>
+      createPayPalFundingOrder({
+        accessToken: "access-token",
+        stableRequestKey: "sponsor-draft-001",
+        amountCents: 700,
+        customId: "sponsor:feedback:001",
+        returnUrl: "https://five.example/sponsor/complete",
+        cancelUrl: "https://five.example/sponsor",
+        environment: "sandbox",
+        fetcher: async () =>
+          new Response(
+            JSON.stringify({
+              id: "ORDER12345678",
+              status: "CREATED",
+              intent: "CAPTURE",
+              purchase_units: [
+                {
+                  custom_id: "sponsor:feedback:001",
+                  invoice_id: ids.invoiceId,
+                  amount: { currency_code: "USD", value: "7.00" },
+                },
+              ],
+              links: [
+                {
+                  rel: "approve",
+                  method: "GET",
+                  href: "https://paypal.example/checkoutnow?token=ORDER12345678",
+                },
+              ],
+            }),
+            { status: 201, headers: { "content-type": "application/json" } },
+          ),
+      }),
+    /PayPal create-order failed with HTTP 201 \(MALFORMED_RESPONSE\)/,
+  );
+});
+
+test("PayPal funding capture recovers already-captured orders from provider truth", async () => {
+  const ids = await createPayPalFundingOrderIdempotency("sponsor-draft-002");
+  const requests: Array<{ url: string; method: string; requestId: string | null }> = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    const request = {
+      url: String(input),
+      method: init?.method ?? "GET",
+      requestId: new Headers(init?.headers).get("PayPal-Request-Id"),
+    };
+    requests.push(request);
+    if (request.method === "POST") {
+      return new Response(
+        JSON.stringify({
+          name: "UNPROCESSABLE_ENTITY",
+          details: [{ issue: "ORDER_ALREADY_CAPTURED" }],
+        }),
+        { status: 422, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        id: "ORDER87654321",
+        status: "COMPLETED",
+        intent: "CAPTURE",
+        purchase_units: [
+          {
+            custom_id: "sponsor:feedback:002",
+            invoice_id: ids.invoiceId,
+            amount: { currency_code: "USD", value: "7.00" },
+            payments: {
+              captures: [
+                {
+                  id: "CAPTURE87654321",
+                  status: "COMPLETED",
+                  amount: { currency_code: "USD", value: "7.00" },
+                  custom_id: "sponsor:feedback:002",
+                  invoice_id: ids.invoiceId,
+                  seller_receivable_breakdown: {
+                    net_amount: { currency_code: "USD", value: "6.50" },
+                  },
+                  create_time: "2026-07-09T20:00:00Z",
+                },
+              ],
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const observation = await capturePayPalFundingOrder({
+    accessToken: "access-token",
+    orderId: "ORDER87654321",
+    stableRequestKey: "sponsor-draft-002",
+    amountCents: 700,
+    customId: "sponsor:feedback:002",
+    baseUrl: "https://paypal.test",
+    fetcher,
+  });
+  assert.equal(observation.orderStatus, "COMPLETED");
+  assert.equal(observation.status, "COMPLETED");
+  assert.equal(observation.captureId, "CAPTURE87654321");
+  assert.equal(observation.grossCents, 700);
+  assert.equal(observation.netCents, 650);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].requestId, ids.captureRequestId);
+  assert.equal(requests[1].method, "GET");
+  assert.equal(requests[1].url, "https://paypal.test/v2/checkout/orders/ORDER87654321");
+});
+
+test("PayPal funding observations distinguish approval, pending capture, and malformed multiplicity", async () => {
+  const ids = await createPayPalFundingOrderIdempotency("sponsor-draft-003");
+  const baseOrder = {
+    id: "ORDER11223344",
+    intent: "CAPTURE",
+    purchase_units: [
+      {
+        custom_id: "sponsor:feedback:003",
+        invoice_id: ids.invoiceId,
+        amount: { currency_code: "USD", value: "7.00" },
+      },
+    ],
+  };
+  const input = {
+    accessToken: "access-token",
+    orderId: "ORDER11223344",
+    stableRequestKey: "sponsor-draft-003",
+    amountCents: 700,
+    customId: "sponsor:feedback:003",
+    baseUrl: "https://paypal.test",
+  } as const;
+
+  const approved = await getPayPalFundingOrder({
+    ...input,
+    fetcher: async () =>
+      new Response(JSON.stringify({ ...baseOrder, status: "APPROVED" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  });
+  assert.equal(approved.status, "APPROVED");
+  assert.equal(approved.captureId, null);
+  assert.equal(approved.netCents, null);
+
+  const pendingCapture = {
+    id: "CAPTURE11223344",
+    status: "PENDING",
+    amount: { currency_code: "USD", value: "7.00" },
+    create_time: "2026-07-09T20:05:00Z",
+  };
+  const pending = await capturePayPalFundingOrder({
+    ...input,
+    fetcher: async () =>
+      new Response(
+        JSON.stringify({
+          ...baseOrder,
+          status: "COMPLETED",
+          purchase_units: [
+            { ...baseOrder.purchase_units[0], payments: { captures: [pendingCapture] } },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+  });
+  assert.equal(pending.orderStatus, "COMPLETED");
+  assert.equal(pending.status, "PENDING");
+  assert.equal(pending.captureId, "CAPTURE11223344");
+  assert.equal(pending.netCents, null);
+
+  await assert.rejects(
+    () =>
+      getPayPalFundingOrder({
+        ...input,
+        fetcher: async () =>
+          new Response(
+            JSON.stringify({
+              ...baseOrder,
+              status: "COMPLETED",
+              purchase_units: [
+                {
+                  ...baseOrder.purchase_units[0],
+                  payments: { captures: [pendingCapture, pendingCapture] },
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      }),
+    /PayPal show-order failed with HTTP 200 \(MALFORMED_RESPONSE\)/,
+  );
+
+  await assert.rejects(
+    () =>
+      getPayPalFundingOrder({
+        ...input,
+        fetcher: async () =>
+          new Response(
+            JSON.stringify({
+              ...baseOrder,
+              status: "COMPLETED",
+              purchase_units: [
+                {
+                  ...baseOrder.purchase_units[0],
+                  payments: {
+                    captures: [{ ...pendingCapture, status: "COMPLETED" }],
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      }),
+    /PayPal show-order failed with HTTP 200 \(MALFORMED_RESPONSE\)/,
+  );
 });
 
 test("OpenAI adapter sends a tool-free structured task and validates its result", async () => {
@@ -270,6 +554,74 @@ test("PayPal webhook verification preserves the raw event object", async () => {
 
   assert.equal(result.signatureVerified, true);
   assert.ok(verificationBody.includes(`"webhook_event":${rawEvent}`));
+});
+
+test("PayPal funding terminal webhooks resolve only an unambiguous capture ID", () => {
+  const refunded = parsePayPalFundingTerminalWebhook(
+    JSON.stringify({
+      id: "WH-FUND-REFUND-001",
+      event_type: "PAYMENT.CAPTURE.REFUNDED",
+      resource_type: "refund",
+      create_time: "2026-07-10T01:00:00Z",
+      resource: {
+        id: "REFUNDSTATE001",
+        supplementary_data: {
+          related_ids: { capture_id: "CAPTURESTATE001" },
+        },
+      },
+    }),
+  );
+  assert.deepEqual(refunded, {
+    eventId: "WH-FUND-REFUND-001",
+    eventType: "PAYMENT.CAPTURE.REFUNDED",
+    captureId: "CAPTURESTATE001",
+    terminalStatus: "REFUNDED",
+    providerEventTime: Date.parse("2026-07-10T01:00:00Z"),
+  });
+
+  const denied = parsePayPalFundingTerminalWebhook(
+    JSON.stringify({
+      id: "WH-FUND-DENIED-001",
+      event_type: "PAYMENT.CAPTURE.DENIED",
+      resource_type: "capture",
+      create_time: "2026-07-10T01:01:00Z",
+      resource: { id: "CAPTURESTATE002" },
+    }),
+  );
+  assert.equal(denied?.captureId, "CAPTURESTATE002");
+  assert.equal(denied?.terminalStatus, "DENIED");
+
+  assert.throws(
+    () =>
+      parsePayPalFundingTerminalWebhook(
+        JSON.stringify({
+          id: "WH-FUND-CONFLICT-001",
+          event_type: "PAYMENT.CAPTURE.REVERSED",
+          resource_type: "capture",
+          create_time: "2026-07-10T01:02:00Z",
+          resource: {
+            id: "CAPTURESTATE003",
+            supplementary_data: {
+              related_ids: { capture_id: "CAPTURESTATE004" },
+            },
+          },
+        }),
+      ),
+    /unambiguous capture identifier/,
+  );
+  assert.throws(
+    () =>
+      parsePayPalFundingTerminalWebhook(
+        JSON.stringify({
+          id: "WH-FUND-NOREL-001",
+          event_type: "PAYMENT.CAPTURE.REFUNDED",
+          resource_type: "refund",
+          create_time: "2026-07-10T01:03:00Z",
+          resource: { id: "REFUNDSTATE002" },
+        }),
+      ),
+    /unambiguous capture identifier/,
+  );
 });
 
 test("arrival email is transactional and idempotent", async () => {

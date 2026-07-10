@@ -24,10 +24,17 @@ The initial task contract is intentionally narrow:
   financial trading, purchases, credentials, ad manipulation, harassment,
   political manipulation, or private-data collection.
 
-The internal task endpoint is an operator control plane, not a payment-collection
-endpoint. It reads the PayPal capture with FIVE's merchant credentials and
-atomically records one receipt plus one task. The same capture cannot create a
-second task. The capture is checked again before model execution.
+The public sponsor path lives at `/sponsor`. The beta charges `$8.00 USD`,
+requires at least `$6.00 USD` in verified net proceeds, reserves exactly `$5.00`
+for the claimant, and accepts only owner-attested dataset-summary work. Drafts
+are immutable after their PayPal order is created. The browser receives an
+approval URL but never receives PayPal credentials or `TASK_ADMIN_SECRET`.
+
+The sponsor flow and the operator-only fallback both read provider truth with
+FIVE's merchant credentials and record one receipt plus one task. The internal
+task endpoint remains a control plane, not a browser payment endpoint. The same
+capture cannot create a second task, and it is checked again before model
+execution.
 
 ## 2. Configure providers
 
@@ -42,11 +49,18 @@ For PayPal:
 5. Register `https://<site-host>/api/webhooks/paypal`.
 6. Subscribe to all `PAYMENT.PAYOUTS-ITEM.*` events, especially `SUCCEEDED`,
    `FAILED`, `UNCLAIMED`, `HELD`, `BLOCKED`, `RETURNED`, `REFUNDED`, and
-   `CANCELED`.
+   `CANCELED`. Also subscribe to sponsor-funding terminal events
+   `PAYMENT.CAPTURE.REFUNDED`, `PAYMENT.CAPTURE.REVERSED`, and
+   `PAYMENT.CAPTURE.DENIED` so refunded or reversed funding immediately removes
+   the task from inventory and halts any unconfirmed claimant payout workflow.
+   Verified terminal events are stored even if they beat local receipt creation;
+   that orphan event fences the stale capture observation from activating work.
 7. Record the webhook ID.
 
 For arrival email, verify a sending domain with Resend and choose the exact
-`NOTIFICATION_FROM_EMAIL` value for transactional messages.
+`NOTIFICATION_FROM_EMAIL` value for transactional messages. Configure a
+monitored `SUPPORT_EMAIL` mailbox for charged sponsor payments that enter
+manual review; live mode rejects an invalid or missing support address.
 
 FIVE never treats a batch-level success as proof that a recipient was paid.
 
@@ -76,7 +90,17 @@ PAYPAL_CLIENT_SECRET
 PAYPAL_WEBHOOK_ID
 RESEND_API_KEY
 NOTIFICATION_FROM_EMAIL=Five <payouts@your-verified-domain.example>
+SUPPORT_EMAIL=support@your-domain.example
+SPONSOR_ALLOWED_EMAILS=approved-sponsor@your-domain.example
+SPONSOR_SITE_ORIGIN=https://your-canonical-site.example
 ```
+
+`SPONSOR_ALLOWED_EMAILS` is a comma-separated private-beta allowlist. If it is
+empty, new browser Checkout orders are disabled while claimant payouts and the
+operator-funded task path continue to work. Keep the public sponsor path
+allowlisted until an appropriate data-loss-prevention review is in place.
+`SPONSOR_SITE_ORIGIN` pins PayPal return and cancel URLs to the canonical HTTPS
+deployment instead of deriving a money-flow redirect from the incoming host.
 
 Leave the optional provider base-URL overrides unset in production. They are
 accepted only with `PROVIDER_TEST_MODE=loopback`, and even then may target only
@@ -85,8 +109,9 @@ accepted only with `PROVIDER_TEST_MODE=loopback`, and even then may target only
 ## 4. Apply and verify the D1 migrations
 
 Back up the target D1 database, apply every checked-in migration in order, and
-confirm that `funded_tasks.funding_receipt_id` and
-`funding_receipts.net_cents` are `NOT NULL`. Do not set `FIVE_MODE=live` if a
+confirm that `funded_tasks.funding_receipt_id`,
+`funding_receipts.net_cents`, and the sponsor attestation/funding columns are
+`NOT NULL`. Do not set `FIVE_MODE=live` if a
 migration fails. Keep the prior sandbox version available as the rollback path;
 never hand-edit a live money row to force a migration through.
 
@@ -104,13 +129,23 @@ Content-Type: application/json
 {"limit":1}
 ```
 
-The endpoint drains both agent jobs and notification outbox rows. Both use
-leases and backoff. PayPal identifiers derive from the job ID, and notification
-requests use stable idempotency keys.
+The endpoint drains sponsor order/capture reconciliation, agent jobs, and
+notification outbox rows. All use leases and backoff. PayPal identifiers derive
+from durable draft/job IDs, and notification requests use stable idempotency
+keys.
 
 ## 6. Add funded inventory
 
-After sponsor funds are present, submit the approved task:
+Preferred path: sign in at `/sponsor`, submit an approved dataset-summary task,
+complete the PayPal approval, and keep or revisit the returned status URL. FIVE
+stores the order before redirecting, captures server-side, recovers through
+authenticated PayPal state even if the browser closes, and creates inventory
+only after the exact capture contract is verified. The status page shows the
+receipt and later the accepted AI result without exposing claimant identity or
+payout data.
+
+The operator endpoint remains an audited fallback for an already-created
+capture. After sponsor funds are present, submit the approved task:
 
 ```text
 POST /api/internal/tasks
@@ -158,6 +193,14 @@ one-owner and one-destination constraints are a backstop, not identity proof.
 ## 8. Verify before public access
 
 - Confirm an unauthenticated request is rejected.
+- Create one sponsor order, reload/retry it, and confirm the same draft, stored
+  PayPal order, and provider idempotency keys are reused.
+- Approve the sponsor order and confirm its `custom_id`, `$8.00 USD` gross
+  amount, and at least `$6.00 USD` net amount before inventory appears.
+- Close the browser after approval and confirm the scheduled reconciler captures
+  that same stored order without a second charge or second task.
+- Confirm the sponsor sees the accepted result but no claimant identity, payout
+  destination, fingerprint, or provider payout IDs.
 - Confirm one verified owner and one payout fingerprint cannot claim twice.
 - Run one low-risk funded task end to end.
 - Confirm the job stops at `payout_pending` after PayPal accepts the batch.

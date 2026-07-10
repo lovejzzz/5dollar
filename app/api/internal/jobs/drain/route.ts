@@ -1,6 +1,7 @@
 import { constantTimeSecretEqual } from "../../../../../lib/crypto";
 import { drainLiveJobs } from "../../../../../lib/process-live-job";
 import { drainNotifications } from "../../../../../lib/process-notification";
+import { drainSponsorCaptures } from "../../../../../lib/process-sponsor-order";
 import {
   getRuntimeEnv,
   requireLiveEnv,
@@ -19,11 +20,12 @@ export async function POST(request: Request) {
     requireLiveEnv(runtime);
     const payload = (await request.json().catch(() => ({}))) as { limit?: number };
     const limit = payload.limit ?? 1;
-    const [jobs, notifications] = await Promise.all([
+    const [sponsorCaptures, jobs, notifications] = await Promise.all([
+      drainSponsorCaptures(limit, { runtime }),
       drainLiveJobs(limit, { runtime }),
       drainNotifications(limit, { runtime }),
     ]);
-    return Response.json({ jobs, notifications });
+    return Response.json({ sponsorCaptures, jobs, notifications });
   } catch {
     return Response.json(
       { error: "The processor could not run." },

@@ -3,6 +3,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import { drainLiveJobs } from "../lib/process-live-job";
 import { drainNotifications } from "../lib/process-notification";
+import { drainSponsorCaptures } from "../lib/process-sponsor-order";
 import { getFiveMode, type RuntimeEnv } from "../lib/runtime-env";
 
 interface Env {
@@ -54,6 +55,7 @@ const worker = {
     if (getFiveMode(runtime) !== "live") return;
     ctx.waitUntil(
       Promise.all([
+        drainSponsorCaptures(5, { runtime }),
         drainLiveJobs(5, { runtime }),
         drainNotifications(5, { runtime }),
       ]),

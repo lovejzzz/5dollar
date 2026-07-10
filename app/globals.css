@@ -21,6 +21,7 @@
 
 html {
   scroll-behavior: smooth;
+  overflow-x: clip;
 }
 
 body {
@@ -29,6 +30,7 @@ body {
   color: var(--ink);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
   -webkit-font-smoothing: antialiased;
+  overflow-x: clip;
 }
 
 button,
@@ -51,7 +53,7 @@ input[type="checkbox"] {
 }
 
 :focus-visible {
-  outline: 3px solid #76a700;
+  outline: 3px solid #4f7600;
   outline-offset: 3px;
 }
 
@@ -1283,7 +1285,12 @@ footer > span {
   }
 
   .hero::before {
-    right: -480px;
+    right: -18px;
+    width: 520px;
+    height: 520px;
+    box-shadow:
+      0 0 0 60px rgba(19, 42, 32, 0.027),
+      0 0 0 120px rgba(19, 42, 32, 0.018);
   }
 
   .hero h1 {

@@ -11,6 +11,9 @@ The same codebase now also contains a credential-gated live path: authenticated
 ownership, encrypted payout destinations, pre-funded task inventory, structured
 OpenAI task execution, an idempotent processor, PayPal Payouts, verified
 webhooks, item-level reconciliation, and a transactional notification outbox.
+It also includes a separate `/sponsor` Checkout flow that turns one verified
+PayPal order into one immutable dataset-summary task and returns the accepted
+result to its sponsor.
 Live mode refuses to start unless every required earning, payout, encryption,
 and email secret is present. No real provider credentials or sponsor funds are
 included in this repository.
@@ -19,13 +22,16 @@ included in this repository.
 
 A live version should be inventory-backed, not magical:
 
-1. A sponsor funds a task through a unique settled PayPal capture.
-2. The agent rechecks the net funds, matches the task, and completes it.
-3. A deterministic source-evidence contract quality-checks the deliverable.
-4. Exactly $5 is released through a supported payout provider.
-5. The job is marked paid only after the provider confirms the individual
+1. A sponsor defines a bounded task and approves its fixed PayPal Checkout order.
+2. FIVE verifies the immutable reference, exact USD amount, and settled net
+   proceeds before creating task inventory.
+3. The agent rechecks the funds, matches the task, and completes it.
+4. A deterministic evidence contract quality-checks the deliverable and makes
+   the accepted result available to the sponsor.
+5. Exactly $5 is released through a supported payout provider.
+6. The job is marked paid only after the provider confirms the individual
    payout succeeded.
-6. A durable outbox sends an idempotent arrival email and retries failures.
+7. A durable outbox sends an idempotent arrival email and retries failures.
 
 The agent must never trade, gamble, spam, impersonate someone, require a user
 deposit, or automate work whose terms prohibit automation.
@@ -51,19 +57,21 @@ npm test
 The tests cover the UI/product contract, production build, prohibited and
 underfunded task rejection, settled-capture parsing, structured OpenAI requests,
 exact $5 PayPal payout shape, stable payout idempotency, notification delivery,
-and a D1 state-machine exercise for replay, lease fencing, stale webhooks,
-reversals, and one-time notification creation.
+PayPal Checkout order/capture recovery, sponsor ownership and sensitive-data
+rejection, and D1 state-machine exercises for replay, lease fencing, stale
+webhooks, reversals, one-time task funding, and one-time notification creation.
 
 See [docs/LIVE_RUNBOOK.md](docs/LIVE_RUNBOOK.md) for the external setup required
 to turn on real earning and payouts.
 
 ## What external production setup still needs
 
-- a sponsor Checkout/order flow that creates the PayPal capture consumed by the
-  internal task endpoint;
 - real sponsor funding and lawful, automation-approved dataset-summary tasks;
+- an intentionally small sponsor allowlist and a data-loss-prevention review
+  before opening task submission beyond the private beta;
 - an approved and funded PayPal Business Payouts account;
-- hosted secrets for OpenAI, encryption, PayPal, Resend, and the processor;
+- hosted secrets for OpenAI, encryption, PayPal, Resend, the processor, and a
+  monitored sponsor-support mailbox;
 - a configured scheduled trigger (or external scheduler) for the idempotent
   job and notification drains;
 - operational monitoring and an appeal/support path;

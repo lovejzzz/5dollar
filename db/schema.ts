@@ -1,10 +1,12 @@
 import {
+  check,
   index,
   integer,
   sqliteTable,
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
 
 export const jobs = sqliteTable(
   "jobs",
@@ -200,6 +202,26 @@ export const paypalWebhookEvents = sqliteTable(
   (table) => [index("paypal_webhook_events_payout_idx").on(table.payoutId)],
 );
 
+export const paypalFundingWebhookEvents = sqliteTable(
+  "paypal_funding_webhook_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    eventType: text("event_type").notNull(),
+    // Null means a verified terminal event arrived before the local receipt.
+    // Receipt creation must treat that orphan event as a hard funding fence.
+    fundingReceiptId: text("funding_receipt_id"),
+    captureId: text("capture_id").notNull(),
+    terminalStatus: text("terminal_status").notNull(),
+    providerEventTime: integer("provider_event_time").notNull(),
+    receivedAt: integer("received_at").notNull(),
+    appliedAt: integer("applied_at"),
+  },
+  (table) => [
+    index("paypal_funding_webhook_events_capture_idx").on(table.captureId),
+    index("paypal_funding_webhook_events_receipt_idx").on(table.fundingReceiptId),
+  ],
+);
+
 export const notificationOutbox = sqliteTable(
   "notification_outbox",
   {
@@ -225,6 +247,109 @@ export const notificationOutbox = sqliteTable(
       table.status,
       table.nextAttemptAt,
       table.leaseExpiresAt,
+    ),
+  ],
+);
+
+export const sponsorOrderRequestLimits = sqliteTable(
+  "sponsor_order_request_limits",
+  {
+    ownerEmail: text("owner_email").primaryKey(),
+    windowStartedAt: integer("window_started_at").notNull(),
+    requestCount: integer("request_count").notNull().default(1),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    check(
+      "sponsor_order_request_limits_count_check",
+      sql`${table.requestCount} >= 1`,
+    ),
+  ],
+);
+
+export const sponsorTaskOrders = sqliteTable(
+  "sponsor_task_orders",
+  {
+    id: text("id").primaryKey(),
+    ownerEmail: text("owner_email").notNull(),
+    clientRequestId: text("client_request_id").notNull(),
+    requestHash: text("request_hash").notNull(),
+    taskType: text("task_type").notNull().default("dataset_summary"),
+    title: text("title").notNull(),
+    instructions: text("instructions").notNull(),
+    inputJson: text("input_json").notNull(),
+    acceptanceJson: text("acceptance_json").notNull(),
+    minAnswerChars: integer("min_answer_chars").notNull().default(120),
+    // Defaults intentionally fail the =1 constraints. Only the validated
+    // sponsor insert path may record affirmative consent explicitly.
+    automationAllowed: integer("automation_allowed").notNull().default(0),
+    autoAccept: integer("auto_accept").notNull().default(0),
+    rightsAttested: integer("rights_attested").notNull().default(0),
+    noSensitiveData: integer("no_sensitive_data").notNull().default(0),
+    attestationVersion: text("attestation_version").notNull(),
+    attestedAt: integer("attested_at").notNull(),
+    sponsorReference: text("sponsor_reference").notNull(),
+    currency: text("currency").notNull().default("USD"),
+    grossCents: integer("gross_cents").notNull().default(800),
+    minimumNetCents: integer("minimum_net_cents").notNull().default(600),
+    payoutCents: integer("payout_cents").notNull().default(500),
+    paypalOrderId: text("paypal_order_id"),
+    paypalCaptureId: text("paypal_capture_id"),
+    fundedTaskId: text("funded_task_id").references(() => fundedTasks.id),
+    status: text("status").notNull().default("draft"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: integer("next_attempt_at"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: integer("lease_expires_at"),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+    completedAt: integer("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("sponsor_task_orders_owner_request_idx").on(
+      table.ownerEmail,
+      table.clientRequestId,
+    ),
+    uniqueIndex("sponsor_task_orders_reference_idx").on(table.sponsorReference),
+    uniqueIndex("sponsor_task_orders_paypal_order_idx").on(table.paypalOrderId),
+    uniqueIndex("sponsor_task_orders_paypal_capture_idx").on(
+      table.paypalCaptureId,
+    ),
+    uniqueIndex("sponsor_task_orders_funded_task_idx").on(table.fundedTaskId),
+    index("sponsor_task_orders_owner_created_idx").on(
+      table.ownerEmail,
+      table.createdAt,
+    ),
+    index("sponsor_task_orders_capture_idx").on(
+      table.status,
+      table.nextAttemptAt,
+      table.leaseExpiresAt,
+    ),
+    check("sponsor_task_orders_task_type_check", sql`${table.taskType} = 'dataset_summary'`),
+    check("sponsor_task_orders_currency_check", sql`${table.currency} = 'USD'`),
+    check("sponsor_task_orders_gross_check", sql`${table.grossCents} = 800`),
+    check(
+      "sponsor_task_orders_minimum_net_check",
+      sql`${table.minimumNetCents} >= 600`,
+    ),
+    check("sponsor_task_orders_payout_check", sql`${table.payoutCents} = 500`),
+    check(
+      "sponsor_task_orders_automation_check",
+      sql`${table.automationAllowed} = 1 AND ${table.autoAccept} = 1`,
+    ),
+    check(
+      "sponsor_task_orders_attestations_check",
+      sql`${table.rightsAttested} = 1 AND ${table.noSensitiveData} = 1`,
+    ),
+    check(
+      "sponsor_task_orders_status_check",
+      sql`${table.status} IN ('draft', 'order_created', 'capture_pending', 'capture_retry', 'funded', 'canceled', 'needs_review')`,
+    ),
+    check(
+      "sponsor_task_orders_funded_completeness_check",
+      sql`${table.status} <> 'funded' OR (${table.paypalOrderId} IS NOT NULL AND ${table.paypalCaptureId} IS NOT NULL AND ${table.fundedTaskId} IS NOT NULL AND ${table.completedAt} IS NOT NULL)`,
     ),
   ],
 );

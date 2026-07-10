@@ -17,6 +17,9 @@ interface Env {
   PAYPAL_API_BASE_URL?: string;
   RESEND_API_KEY?: string;
   NOTIFICATION_FROM_EMAIL?: string;
+  SUPPORT_EMAIL?: string;
+  SPONSOR_ALLOWED_EMAILS?: string;
+  SPONSOR_SITE_ORIGIN?: string;
   RESEND_API_BASE_URL?: string;
   PROVIDER_TEST_MODE?: "loopback";
 }
