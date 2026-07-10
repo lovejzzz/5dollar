@@ -387,8 +387,7 @@ input[type="checkbox"] {
   font-weight: 670;
 }
 
-.field-group input,
-.field-group select {
+.field-group input {
   width: 100%;
   height: 54px;
   padding: 0 16px;
@@ -400,14 +399,12 @@ input[type="checkbox"] {
   transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
 }
 
-.field-group input:hover,
-.field-group select:hover {
+.field-group input:hover {
   border-color: #84978b;
   background: #fff;
 }
 
-.field-group input:focus,
-.field-group select:focus {
+.field-group input:focus {
   border-color: var(--success);
   box-shadow: 0 0 0 4px rgba(8, 122, 75, 0.1);
   outline: none;
@@ -423,24 +420,31 @@ input[type="checkbox"] {
   color: #86938c;
 }
 
-.select-wrap {
-  position: relative;
+.payout-rail {
+  min-height: 38px;
+  margin: -4px 0 18px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #c7d2ca;
+  border-radius: 10px;
+  background: #f5faf7;
+  color: #40564a;
 }
 
-.select-wrap::after {
-  content: "⌄";
-  position: absolute;
-  right: 16px;
-  top: 50%;
-  color: #607168;
-  font-size: 17px;
-  pointer-events: none;
-  transform: translateY(-57%);
+.payout-rail span {
+  color: #087a4b;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.12em;
 }
 
-.select-wrap select {
-  appearance: none;
-  padding-right: 44px;
+.payout-rail strong {
+  font-size: 11px;
+  font-weight: 620;
 }
 
 .field-help,
@@ -476,33 +480,6 @@ input[type="checkbox"] {
 
 .sign-in-action:hover {
   color: #043e27;
-}
-
-.notification-choice {
-  margin: 17px 0 0;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  color: #34493e;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.35;
-}
-
-.notification-choice input {
-  width: 17px;
-  height: 17px;
-  margin: 1px 0 0;
-  accent-color: var(--success);
-}
-
-.notification-choice small {
-  display: block;
-  margin-top: 2px;
-  color: #75827a;
-  font-size: 10px;
-  font-weight: 450;
 }
 
 .primary-button,

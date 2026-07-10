@@ -8,7 +8,6 @@ export async function GET() {
     return Response.json({
       mode,
       liveReady: false,
-      payoutMethods: ["paypal", "zelle", "cashapp", "venmo", "other"],
       availableFundedTasks: 0,
     });
   }
@@ -19,7 +18,6 @@ export async function GET() {
     return Response.json({
       mode,
       liveReady: true,
-      payoutMethods: ["paypal"],
       availableFundedTasks: stats.availableFundedTasks,
     });
   } catch {
@@ -27,7 +25,6 @@ export async function GET() {
       {
         mode,
         liveReady: false,
-        payoutMethods: ["paypal"],
         availableFundedTasks: 0,
         error: "Live mode is not fully configured.",
       },

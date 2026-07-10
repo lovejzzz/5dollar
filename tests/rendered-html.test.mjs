@@ -17,6 +17,10 @@ test("defines the complete FIVE product experience", async () => {
   assert.match(app, /Your next \$5,/);
   assert.match(app, /Get me \$5/);
   assert.match(app, /Where should we send it\?/);
+  assert.match(app, /Payout method: PayPal/);
+  assert.match(app, /JSON\.stringify\(\{ payoutMethod: "paypal", destination \}\)/);
+  assert.doesNotMatch(app, /id="payout-method"/);
+  assert.doesNotMatch(app, /type="checkbox"/);
   assert.match(app, /SANDBOX PREVIEW/);
   assert.match(app, /No real money is earned or sent/);
   assert.match(app, /PAYOUT CONFIRMED/);
@@ -48,6 +52,9 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
     sponsorCreate,
     sponsorCapture,
     sponsorProcessor,
+    canaryRoute,
+    canaryProof,
+    canaryScript,
   ] = await Promise.all([
     readFile(new URL("app/api/jobs/route.ts", root), "utf8"),
     readFile(new URL("app/api/jobs/[id]/route.ts", root), "utf8"),
@@ -58,6 +65,9 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
     readFile(new URL("app/api/sponsor/orders/route.ts", root), "utf8"),
     readFile(new URL("app/api/sponsor/orders/[id]/capture/route.ts", root), "utf8"),
     readFile(new URL("lib/process-sponsor-order.ts", root), "utf8"),
+    readFile(new URL("app/api/internal/canary/[id]/route.ts", root), "utf8"),
+    readFile(new URL("lib/live-canary.ts", root), "utf8"),
+    readFile(new URL("scripts/verify-live-canary.mjs", root), "utf8"),
   ]);
 
   assert.match(createRoute, /export async function POST/);
@@ -85,5 +95,11 @@ test("ships the durable sandbox and live-money routes and migrations", async () 
   assert.match(sponsorCapture, /processSponsorCapture/);
   assert.match(sponsorProcessor, /capturePayPalFundingOrder/);
   assert.match(sponsorProcessor, /drainSponsorCaptures/);
+  assert.match(canaryRoute, /constantTimeSecretEqual/);
+  assert.match(canaryRoute, /private, no-store/);
+  assert.match(canaryProof, /individualPayoutSucceeded/);
+  assert.match(canaryProof, /arrivalNotificationSent/);
+  assert.match(canaryProof, /noFundingReversal/);
+  assert.match(canaryScript, /PROCESSOR_SECRET/);
   await assert.rejects(access(new URL("app/_sites-preview/SkeletonPreview.tsx", root)));
 });

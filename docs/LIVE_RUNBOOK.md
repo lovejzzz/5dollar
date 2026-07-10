@@ -213,5 +213,16 @@ one-owner and one-destination constraints are a backstop, not identity proof.
 - Test `UNCLAIMED`, `FAILED`, provider timeout, and expired-lease recovery paths.
 - Confirm the Resend arrival email is delivered once and its outbox row is
   marked `sent`; PayPal's own notification is supplemental.
+- Run the canary certificate and require every gate to be `true`:
+
+  ```bash
+  PROCESSOR_SECRET=<hosted-secret> npm run verify:live-canary -- \
+    https://<site-host> <live-job-uuid> --wait=300
+  ```
+
+  A passing `five-live-canary-v1` certificate proves the exact reward, settled
+  sponsor capture, accepted AI work, individual PayPal item success, notification
+  provider acceptance of the arrival email, and absence of a terminal funding
+  event. It contains no owner, destination, or provider transaction identifiers.
 - Review logs to ensure they contain no raw payout destination or provider
   secret.

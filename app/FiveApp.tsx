@@ -5,7 +5,6 @@ import {
   useEffect,
   useRef,
   useState,
-  useSyncExternalStore,
 } from "react";
 
 type PayoutMethod = "paypal" | "zelle" | "cashapp" | "venmo" | "other";
@@ -46,82 +45,33 @@ type PublicJob = {
 type AppConfig = {
   mode: "loading" | "sandbox" | "live";
   liveReady: boolean;
-  payoutMethods: PayoutMethod[];
   availableFundedTasks: number;
 };
 
-const METHOD_OPTIONS: Array<{
-  value: PayoutMethod;
-  label: string;
-  availability: string;
-}> = [
-  { value: "paypal", label: "PayPal", availability: "planned live rail" },
-  { value: "zelle", label: "Zelle", availability: "preview only" },
-  { value: "cashapp", label: "Cash App", availability: "preview only" },
-  { value: "venmo", label: "Venmo", availability: "preview only" },
-  { value: "other", label: "Other", availability: "preview only" },
-];
-
-const PLACEHOLDERS: Record<PayoutMethod, string> = {
-  paypal: "Email, phone, or PayPal ID",
-  zelle: "Email or U.S. mobile number",
-  cashapp: "$cashtag",
-  venmo: "@username",
-  other: "Payout address or handle",
-};
-
-const METHOD_HELP: Record<PayoutMethod, string> = {
-  paypal: "A live version would use a PayPal-linked email, phone, or PayPal ID.",
-  zelle: "Shown for product preview only; a live Zelle rail is not connected.",
-  cashapp: "Shown for product preview only; a live Cash App rail is not connected.",
-  venmo: "Shown for product preview only; a live Venmo rail is not connected.",
-  other: "Shown for product preview only; no generic payout rail is connected.",
-};
-
-function subscribeToBrowserCapabilities() {
-  return () => undefined;
-}
-
-function validateDestination(method: PayoutMethod, value: string) {
+function validateDestination(value: string) {
   const destination = value.trim();
   if (!destination) return "Enter a payout destination.";
   if (destination.length > 120) return "That payout destination is too long.";
 
   const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const phone = /^\+?[\d\s().-]{7,22}$/;
-  const handle = /^@?[a-zA-Z0-9._-]{2,40}$/;
-  const valid =
-    method === "paypal"
-      ? email.test(destination) || phone.test(destination) || handle.test(destination)
-      : method === "zelle"
-        ? email.test(destination) || phone.test(destination)
-        : method === "cashapp"
-          ? /^\$[a-zA-Z][a-zA-Z0-9_]{1,19}$/.test(destination)
-          : method === "venmo"
-            ? handle.test(destination)
-            : destination.length >= 3;
+  const phoneSyntax = /^\+?[0-9\s().-]+$/;
+  const phoneDigits = destination.replace(/\D/g, "").length;
+  const phone = phoneSyntax.test(destination) && phoneDigits >= 7 && phoneDigits <= 15;
+  const paypalId = /^[2-9A-HJ-NP-Z]{13}$/.test(destination);
+  const valid = email.test(destination) || phone || paypalId;
   return valid ? "" : "Check that destination and try again.";
 }
 
 function AgentCard({ config }: { config: AppConfig }) {
-  const [method, setMethod] = useState<PayoutMethod>("paypal");
   const [destination, setDestination] = useState("");
   const [error, setError] = useState("");
   const [signInUrl, setSignInUrl] = useState("");
   const [job, setJob] = useState<PublicJob | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [notifyBrowser, setNotifyBrowser] = useState(false);
-  const notificationsAvailable = useSyncExternalStore(
-    subscribeToBrowserCapabilities,
-    () => "Notification" in window,
-    () => false,
-  );
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const notifiedJob = useRef<string | null>(null);
   const focusedJob = useRef<string | null>(null);
   const jobId = job?.id ?? null;
   const jobStatus = job?.status ?? null;
-  const jobMode = job?.mode ?? null;
 
   useEffect(() => {
     if (
@@ -160,26 +110,11 @@ function AgentCard({ config }: { config: AppConfig }) {
       focusedJob.current = jobId;
       headingRef.current?.focus();
     }
-    if (
-      (jobStatus === "complete" || jobStatus === "paid") &&
-      notifiedJob.current !== jobId &&
-      notifyBrowser &&
-      "Notification" in window &&
-      Notification.permission === "granted"
-    ) {
-      notifiedJob.current = jobId;
-      new Notification(jobMode === "live" ? "Your $5 has arrived" : "FIVE demo complete", {
-        body:
-          jobMode === "live"
-            ? "PayPal confirmed that your individual $5 payout succeeded."
-            : "The preview finished. No real task or payment was created.",
-      });
-    }
-  }, [jobId, jobMode, jobStatus, notifyBrowser]);
+  }, [jobId, jobStatus]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const validationError = validateDestination(method, destination);
+    const validationError = validateDestination(destination);
     if (validationError) {
       setError(validationError);
       return;
@@ -189,17 +124,10 @@ function AgentCard({ config }: { config: AppConfig }) {
     setError("");
     setSignInUrl("");
     try {
-      if (
-        notifyBrowser &&
-        notificationsAvailable &&
-        Notification.permission === "default"
-      ) {
-        await Notification.requestPermission();
-      }
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ payoutMethod: method, destination }),
+        body: JSON.stringify({ payoutMethod: "paypal", destination }),
       });
       const payload = (await response.json()) as {
         job?: PublicJob;
@@ -216,7 +144,6 @@ function AgentCard({ config }: { config: AppConfig }) {
         );
         throw new Error(payload.error || "The demo could not be started.");
       }
-      notifiedJob.current = null;
       setJob(payload.job);
     } catch (submitError) {
       setError(
@@ -232,7 +159,6 @@ function AgentCard({ config }: { config: AppConfig }) {
     setDestination("");
     setError("");
     setSignInUrl("");
-    notifiedJob.current = null;
     focusedJob.current = null;
   }
 
@@ -349,31 +275,9 @@ function AgentCard({ config }: { config: AppConfig }) {
       </h2>
 
       <form onSubmit={handleSubmit} noValidate>
-        <div className="field-group">
-          <label htmlFor="payout-method">Payout method</label>
-          <div className="select-wrap">
-            <select
-              id="payout-method"
-              value={method}
-              onChange={(event) => {
-                setMethod(event.target.value as PayoutMethod);
-                setError("");
-                setSignInUrl("");
-              }}
-            >
-              {METHOD_OPTIONS.filter(
-                (option) => config.mode !== "live" || option.value === "paypal",
-              ).map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label} —{
-                    config.mode === "live" && option.value === "paypal"
-                      ? " live rail"
-                      : ` ${option.availability}`
-                  }
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="payout-rail" aria-label="Payout method: PayPal">
+          <span>PAYPAL</span>
+          <strong>First live payout rail</strong>
         </div>
 
         <div className="field-group">
@@ -387,8 +291,8 @@ function AgentCard({ config }: { config: AppConfig }) {
               if (error) setError("");
               if (signInUrl) setSignInUrl("");
             }}
-            onBlur={() => destination && setError(validateDestination(method, destination))}
-            placeholder={PLACEHOLDERS[method]}
+            onBlur={() => destination && setError(validateDestination(destination))}
+            placeholder="Email, phone, or PayPal ID"
             autoComplete="off"
             spellCheck={false}
             aria-invalid={Boolean(error)}
@@ -408,32 +312,12 @@ function AgentCard({ config }: { config: AppConfig }) {
             </>
           ) : (
             <p className="field-help" id="destination-help">
-              {config.mode === "live" && method === "paypal"
+              {config.mode === "live"
                 ? "Use the email, phone number, or PayPal ID that should receive the live payout."
-                : METHOD_HELP[method]}
+                : "PayPal is the first live payout rail. This sandbox does not send money."}
             </p>
           )}
         </div>
-
-        {notificationsAvailable && (
-          <label className="notification-choice">
-            <input
-              type="checkbox"
-              checked={notifyBrowser}
-              onChange={(event) => setNotifyBrowser(event.target.checked)}
-            />
-            <span>
-              {config.mode === "live"
-                ? "Notify me in this browser when the $5 arrives"
-                : "Notify me in this browser when the demo finishes"}
-              <small>
-                {config.mode === "live"
-                  ? "A transactional arrival email is sent automatically; browser alerts are optional."
-                  : "You may be asked for notification permission."}
-              </small>
-            </span>
-          </label>
-        )}
 
         <button
           className={`primary-button ${liveRequestDisabled ? "primary-button--unavailable" : ""}`}
@@ -461,7 +345,7 @@ function AgentCard({ config }: { config: AppConfig }) {
 
       <p className="card-assurance">
         <span className="assurance-mark" aria-hidden="true">✓</span>
-        No password. No card. No upfront payment.
+        No password. No card. No upfront payment. Live arrival email is automatic.
       </p>
     </section>
   );
@@ -471,7 +355,6 @@ export function FiveApp() {
   const [config, setConfig] = useState<AppConfig>({
     mode: "loading",
     liveReady: false,
-    payoutMethods: [],
     availableFundedTasks: 0,
   });
 
@@ -484,9 +367,6 @@ export function FiveApp() {
           setConfig({
             mode: payload.mode === "live" ? "live" : "sandbox",
             liveReady: payload.liveReady === true,
-            payoutMethods: Array.isArray(payload.payoutMethods)
-              ? payload.payoutMethods
-              : ["paypal"],
             availableFundedTasks:
               typeof payload.availableFundedTasks === "number"
                 ? payload.availableFundedTasks
@@ -499,7 +379,6 @@ export function FiveApp() {
           setConfig({
             mode: "sandbox",
             liveReady: false,
-            payoutMethods: ["paypal", "zelle", "cashapp", "venmo", "other"],
             availableFundedTasks: 0,
           });
         }
@@ -578,7 +457,7 @@ export function FiveApp() {
             <article>
               <span className="step-number">01</span>
               <h3>Choose where</h3>
-              <p>Pick a payout method and enter only the destination needed to route it.</p>
+              <p>Enter the PayPal email, phone number, or ID that should receive the $5.</p>
             </article>
             <article>
               <span className="step-number">02</span>

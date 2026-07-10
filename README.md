@@ -61,6 +61,14 @@ PayPal Checkout order/capture recovery, sponsor ownership and sensitive-data
 rejection, and D1 state-machine exercises for replay, lease fencing, stale
 webhooks, reversals, one-time task funding, and one-time notification creation.
 
+After a production canary runs, verify its complete sponsor → AI → individual
+payout → arrival-email proof without exposing claimant or provider identifiers:
+
+```bash
+PROCESSOR_SECRET=<hosted-secret> npm run verify:live-canary -- \
+  https://your-site.example <live-job-uuid> --wait=300
+```
+
 See [docs/LIVE_RUNBOOK.md](docs/LIVE_RUNBOOK.md) for the external setup required
 to turn on real earning and payouts.
 
