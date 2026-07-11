@@ -62,6 +62,15 @@ See [docs/LIVE_RUNBOOK.md](docs/LIVE_RUNBOOK.md) for the external gates and
 activation sequence. Keep `FIVE_MODE=sandbox` until every production gate and a
 real end-to-end canary pass.
 
+## Funded video bounties
+
+FIVE also includes a guarded LTX-2.3 production pipeline for legitimate,
+pre-funded video bounties. It estimates generation cost before spending,
+generates synchronized video and audio through the async API, runs deterministic
+motion/audio/format checks, packages a credited poster frame and AI disclosure,
+and can submit exactly once through Taskmarket. See
+[docs/VIDEO_BOUNTY_PIPELINE.md](docs/VIDEO_BOUNTY_PIPELINE.md).
+
 ## Safety contract
 
 The agent must never trade, gamble, spam, impersonate someone, require a user
