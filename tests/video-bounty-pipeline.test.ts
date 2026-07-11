@@ -6,6 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { validateVideoBountyJob } from "../tools/video-bounty/job";
 import { LtxClient } from "../tools/video-bounty/ltx-client";
+import { buildOfficialLtxArgs } from "../tools/video-bounty/local-ltx";
 import { evaluateProfitability } from "../tools/video-bounty/pricing";
 import { verifyCreativeApproval } from "../tools/video-bounty/taskmarket";
 
@@ -46,6 +47,34 @@ test("profit guard rejects a bounty that cannot retain five dollars", () => {
 
 test("job validation rejects unsupported Pro duration", () => {
   assert.throws(() => validateVideoBountyJob({ ...job, duration: 20 }), /not supported/);
+});
+
+test("local LTX runner builds an argument array without a shell and preserves the exact prompt", () => {
+  const args = buildOfficialLtxArgs(job, "/tmp/output", {
+    pythonPath: "/tmp/env/bin/python",
+    repositoryDir: "/tmp/LTX-Video",
+    width: 768,
+    height: 432,
+    seed: 42,
+  });
+  assert.equal(args[0], "/tmp/LTX-Video/inference.py");
+  assert.equal(args[args.indexOf("--prompt") + 1], job.prompt);
+  assert.equal(args[args.indexOf("--num_frames") + 1], "240");
+  assert.equal(args[args.indexOf("--pipeline_config") + 1], "/tmp/LTX-Video/configs/ltxv-2b-0.9.8-distilled.yaml");
+});
+
+test("local LTX runner rejects invalid dimensions before execution", () => {
+  assert.throws(
+    () =>
+      buildOfficialLtxArgs(job, "/tmp/output", {
+        pythonPath: "/tmp/env/bin/python",
+        repositoryDir: "/tmp/LTX-Video",
+        width: 0,
+        height: 432,
+        seed: 42,
+      }),
+    /local width/,
+  );
 });
 
 test("LTX client submits, polls, and returns the completed video URL", async () => {

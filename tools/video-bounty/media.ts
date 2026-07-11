@@ -151,6 +151,7 @@ export async function packageVideo(
   job: VideoBountyJob,
   sourcePath: string,
   workspaceDir: string,
+  backendLabel = `Lightricks ${job.model}`,
 ): Promise<{
   finalPath: string;
   posterPath: string;
@@ -236,7 +237,7 @@ export async function packageVideo(
   const note = [
     `Title: ${job.title}`,
     "",
-    `Model: Lightricks ${job.model}.`,
+    `Model: ${backendLabel}.`,
     `Sound vibe: ${job.soundVibe}`,
     `AI disclosure: ${job.disclosure}`,
     ...job.researchSources.map((source) => `Source: ${source}`),
@@ -260,7 +261,7 @@ export async function packageVideo(
   );
   await writeFile(
     manifestPath,
-    `${JSON.stringify({ taskId: job.taskId, model: job.model, artifacts }, null, 2)}\n`,
+    `${JSON.stringify({ taskId: job.taskId, model: backendLabel, artifacts }, null, 2)}\n`,
     "utf8",
   );
   return { finalPath, posterPath, contactSheetPath, notePath, qaPath, manifestPath };

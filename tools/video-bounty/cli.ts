@@ -3,6 +3,7 @@ import { access, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadVideoBountyJob, resolveWorkspaceDir } from "./job";
 import { readLtxApiKey } from "./keychain";
+import { generateWithOfficialLocalLtx, OFFICIAL_LTX_COMMIT } from "./local-ltx";
 import { LtxClient } from "./ltx-client";
 import { packageVideo, qaVideo } from "./media";
 import { evaluateProfitability, LTX_PRICING_SNAPSHOT_DATE, LTX_PRICING_SOURCE } from "./pricing";
@@ -29,6 +30,9 @@ async function fileExists(filePath: string): Promise<boolean> {
 function usage(): never {
   console.error(`Usage:
   npm run video:bounty -- estimate --job <job.json>
+  npm run video:bounty -- local-estimate --job <job.json>
+  npm run video:bounty -- local-generate --job <job.json> --confirm-electricity-only
+  npm run video:bounty -- local-run --job <job.json> --confirm-electricity-only
   npm run video:bounty -- generate --job <job.json> --confirm-cost-usd <amount>
   npm run video:bounty -- package --job <job.json> --input <source.mp4>
   npm run video:bounty -- qa --job <job.json> --input <final.mp4>
@@ -65,6 +69,25 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "local-estimate") {
+    console.log(
+      JSON.stringify(
+        {
+          taskId: job.taskId,
+          backend: `Lightricks/LTX-Video@${OFFICIAL_LTX_COMMIT} ltxv-2b-0.9.8-distilled on Apple MPS`,
+          generationCostUsd: 0,
+          expectedProfitAfterGenerationUsd: job.expectedNetRewardUsd,
+          electricityExcluded: true,
+          defaultLocalResolution: job.resolution.endsWith("x1920") ? "432x768" : "768x432",
+          finalResolution: job.resolution,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
   const input = option("--input");
   if (command === "qa") {
     if (!input) usage();
@@ -93,6 +116,40 @@ async function main(): Promise<void> {
       workspaceDir,
     );
     console.log(JSON.stringify(evidence, null, 2));
+    return;
+  }
+
+  if (command === "local-generate" || command === "local-run") {
+    if (!has("--confirm-electricity-only")) {
+      throw new Error("Local generation requires --confirm-electricity-only");
+    }
+    const vertical = job.resolution.endsWith("x1920") || job.resolution.endsWith("x2560") || job.resolution.endsWith("x3840");
+    const localWidth = Number(option("--local-width") ?? (vertical ? 432 : 768));
+    const localHeight = Number(option("--local-height") ?? (vertical ? 768 : 432));
+    const seed = Number(option("--seed") ?? 171198);
+    const localSourcePath = path.join(workspaceDir, "ltx-local-source.mp4");
+    if (await fileExists(localSourcePath)) {
+      throw new Error(`Local source already exists at ${localSourcePath}; refusing to spend electricity twice`);
+    }
+    const local = await generateWithOfficialLocalLtx(job, workspaceDir, {
+      pythonPath: process.env.FIVE_LTX_LOCAL_PYTHON ?? path.resolve(".context/ltx-local/env/bin/python"),
+      repositoryDir: process.env.FIVE_LTX_LOCAL_REPO ?? path.resolve(".context/vendor/LTX-Video"),
+      configPath: process.env.FIVE_LTX_LOCAL_CONFIG ?? path.resolve("tools/video-bounty/ltxv-2b-0.9.8-local.yaml"),
+      width: localWidth,
+      height: localHeight,
+      seed,
+    });
+    if (command === "local-generate") {
+      console.log(JSON.stringify(local, null, 2));
+      return;
+    }
+    const packaged = await packageVideo(job, local.sourcePath, workspaceDir, local.backend);
+    if (has("--submit")) {
+      const submission = await submitToTaskmarket(job, packaged, workspaceDir);
+      console.log(JSON.stringify({ ...local, ...packaged, submission }, null, 2));
+    } else {
+      console.log(JSON.stringify({ ...local, ...packaged }, null, 2));
+    }
     return;
   }
 
