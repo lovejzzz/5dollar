@@ -69,7 +69,10 @@ pre-funded video bounties. It estimates generation cost before spending,
 generates synchronized video and audio through the async API, runs deterministic
 motion/audio/format checks, packages a credited poster frame and AI disclosure,
 and can submit exactly once through Taskmarket. See
-[docs/VIDEO_BOUNTY_PIPELINE.md](docs/VIDEO_BOUNTY_PIPELINE.md).
+[docs/VIDEO_BOUNTY_PIPELINE.md](docs/VIDEO_BOUNTY_PIPELINE.md). The verified
+local backend, separate-workstation choices, benchmark gates, and migration
+sequence are tracked in
+[docs/LOCAL_VIDEO_WORKSTATION_PLAN.md](docs/LOCAL_VIDEO_WORKSTATION_PLAN.md).
 
 ## Safety contract
 
