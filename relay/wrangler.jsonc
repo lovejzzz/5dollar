@@ -1,0 +1,12 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "five-production-relay",
+  "main": "index.ts",
+  "compatibility_date": "2026-07-10",
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    "FIVE_TARGET_ORIGIN": "https://five-dollar-agent.skylab.chatgpt.site"
+  }
+}

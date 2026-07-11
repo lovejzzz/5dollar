@@ -16,6 +16,7 @@ test("checked-in migrations produce the final constrained live schema", () => {
       "0001",
       "0002",
       "0003",
+      "0004",
     ]);
     for (const migration of migrations) {
       database.exec(readFileSync(`${directory}/${migration}`, "utf8"));
@@ -44,6 +45,9 @@ test("checked-in migrations produce the final constrained live schema", () => {
       .all() as Array<{ name: string; notnull: number; pk: number }>;
     const resendWebhookColumns = database
       .prepare("PRAGMA table_info(resend_webhook_events)")
+      .all() as Array<{ name: string; notnull: number; pk: number }>;
+    const giftCardRewardColumns = database
+      .prepare("PRAGMA table_info(gift_card_rewards)")
       .all() as Array<{ name: string; notnull: number; pk: number }>;
     assert.equal(
       fundedTaskColumns.find((column) => column.name === "funding_receipt_id")?.notnull,
@@ -153,6 +157,25 @@ test("checked-in migrations produce the final constrained live schema", () => {
       resendWebhookColumns.find((column) => column.name === "event_id")?.pk,
       1,
     );
+    for (const required of [
+      "task_id",
+      "provider",
+      "order_id",
+      "reward_id",
+      "status",
+      "created_at",
+      "updated_at",
+    ]) {
+      assert.equal(
+        giftCardRewardColumns.find((column) => column.name === required)?.notnull,
+        1,
+        `gift_card_rewards.${required} must be NOT NULL`,
+      );
+    }
+    assert.equal(
+      giftCardRewardColumns.find((column) => column.name === "task_id")?.pk,
+      1,
+    );
 
     const sponsorForeignKeys = database
       .prepare("PRAGMA foreign_key_list(sponsor_task_orders)")
@@ -162,6 +185,17 @@ test("checked-in migrations produce the final constrained live schema", () => {
         (key) =>
           key.table === "funded_tasks" &&
           key.from === "funded_task_id" &&
+          key.to === "id",
+      ),
+    );
+    const giftCardForeignKeys = database
+      .prepare("PRAGMA foreign_key_list(gift_card_rewards)")
+      .all() as Array<{ table: string; from: string; to: string }>;
+    assert.ok(
+      giftCardForeignKeys.some(
+        (key) =>
+          key.table === "funded_tasks" &&
+          key.from === "task_id" &&
           key.to === "id",
       ),
     );
@@ -243,6 +277,12 @@ test("checked-in migrations produce the final constrained live schema", () => {
     assert.ok(
       resendWebhookIndexes.includes("resend_webhook_events_notification_idx"),
     );
+    const giftCardIndexes = database
+      .prepare("PRAGMA index_list(gift_card_rewards)")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    assert.ok(giftCardIndexes.includes("gift_card_rewards_order_idx"));
+    assert.ok(giftCardIndexes.includes("gift_card_rewards_reward_idx"));
 
     const tables = database
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -259,6 +299,7 @@ test("checked-in migrations produce the final constrained live schema", () => {
       "resend_webhook_events",
       "sponsor_order_request_limits",
       "sponsor_task_orders",
+      "gift_card_rewards",
     ]) {
       assert.ok(tables.includes(expected), `missing migrated table ${expected}`);
     }

@@ -1,158 +1,128 @@
-# FIVE live-mode runbook
+# FIVE gift-card live-mode runbook
 
-Live mode moves money. Activate it only after the funding, provider, security,
-and compliance prerequisites below are complete.
+The public promise is simple; activation is intentionally strict. The currently
+deployed app stays private and in sandbox until every gate below is complete.
 
-## 1. Establish the real funding source
+## 1. Establish the real economic loop
 
-FIVE does not create money. A sponsor or the platform must pre-fund each task
-before it enters `funded_tasks`.
+FIVE does not create money. Before a task can be claimed, the operator must pay
+for one `$5.00 USD` digital reward and bind it to one approved task. Model,
+email, provider, and operating costs are separate from the claimant's full $5.
 
-The initial task contract is intentionally narrow:
+The first task contract is intentionally narrow:
 
-- a FIVE-owned PayPal Checkout/order flow captures the sponsor payment and sets
-  `custom_id` to the precommitted sponsor reference;
-- the verified capture has status `COMPLETED`, currency `USD`, and net proceeds
-  at least equal to the declared task reward;
-- one capture funds only one task and cannot be replayed;
-- exactly `$5.00` is reserved for the user reward;
-- the remaining amount covers model and payout costs;
-- the sponsor explicitly permits automated completion;
-- the first live task type is `dataset_summary`, and every required evidence ID
-  must exist in the supplied input and appear in the agent submission;
-- the work cannot involve spam, impersonation, fake reviews, gambling,
-  financial trading, purchases, credentials, ad manipulation, harassment,
-  political manipulation, or private-data collection.
+- `dataset_summary` only;
+- the sponsor or operator owns the input and explicitly permits automation;
+- every required evidence ID is supplied in the input and must appear in the
+  agent's structured submission;
+- automatic acceptance is deterministic;
+- no spam, impersonation, fake reviews, gambling, financial trading,
+  purchases, credentials, ad manipulation, harassment, political
+  manipulation, or private-data collection.
 
-The public sponsor path lives at `/sponsor`. The beta charges `$8.00 USD`,
-requires at least `$6.00 USD` in verified net proceeds, reserves exactly `$5.00`
-for the claimant, and accepts only owner-attested dataset-summary work. Drafts
-are immutable after their PayPal order is created. The browser receives an
-approval URL but never receives PayPal credentials or `TASK_ADMIN_SECRET`.
+## 2. Obtain a production gift-card provider account
 
-The sponsor flow and the operator-only fallback both read provider truth with
-FIVE's merchant credentials and record one receipt plus one task. The internal
-task endpoint remains a control plane, not a browser payment endpoint. The same
-capture cannot create a second task, and it is checked again before model
-execution.
+FIVE's first reward provider is Tremendous. Use Test Flight for integration,
+then request production API access from the Tremendous dashboard. Production
+approval is an external account gate; Tremendous may request company and
+banking documentation. Do not enter invented information and do not assume a
+gift-card API is an SSN bypass.
 
-## 2. Configure providers
+Record these values outside the repository:
 
-Create an OpenAI API project for task execution.
+```text
+TREMENDOUS_API_KEY
+TREMENDOUS_CAMPAIGN_ID
+TREMENDOUS_FUNDING_SOURCE_ID   # optional; balance is the default
+```
 
-For PayPal:
+The campaign must support a link-delivery reward with a `$5.00 USD`
+denomination. Fund the production balance before creating inventory.
 
-1. Use a verified PayPal Business account.
-2. Request and receive PayPal Payouts access.
-3. Fund the PayPal balance for rewards and fees.
-4. Create an app and record its client ID and secret.
-5. Register `https://<site-host>/api/webhooks/paypal`.
-6. Subscribe to all `PAYMENT.PAYOUTS-ITEM.*` events, especially `SUCCEEDED`,
-   `FAILED`, `UNCLAIMED`, `HELD`, `BLOCKED`, `RETURNED`, `REFUNDED`, and
-   `CANCELED`. Also subscribe to sponsor-funding terminal events
-   `PAYMENT.CAPTURE.REFUNDED`, `PAYMENT.CAPTURE.REVERSED`, and
-   `PAYMENT.CAPTURE.DENIED` so refunded or reversed funding immediately removes
-   the task from inventory and halts any unconfirmed claimant payout workflow.
-   Verified terminal events are stored even if they beat local receipt creation;
-   that orphan event fences the stale capture observation from activating work.
-7. Record the webhook ID.
+Provider references:
 
-For arrival email, verify a sending domain with Resend and choose the exact
-`NOTIFICATION_FROM_EMAIL` value for transactional messages. Register
-`https://<site-host>/api/webhooks/resend`, subscribe to `email.delivered`,
-`email.delivery_delayed`, `email.bounced`, `email.failed`, and
-`email.suppressed`, and record the endpoint signing secret as
-`RESEND_WEBHOOK_SECRET`. The handler verifies the raw Svix signature, stores no
-recipient address from the webhook, requires the category tag attached by FIVE,
-and deduplicates the provider's at-least-once events. Configure a monitored
-`SUPPORT_EMAIL` mailbox for charged sponsor payments that enter manual review;
-live mode rejects an invalid or missing support address.
+- https://developers.tremendous.com/docs/sandbox-environment
+- https://developers.tremendous.com/docs/production-api-access
+- https://developers.tremendous.com/docs/link-delivery
 
-FIVE never treats a batch-level success as proof that a recipient was paid.
+## 3. Configure AI and transactional email
 
-## 3. Create hosted secrets
+Create an OpenAI API project for bounded task execution. The adapter has no
+tools and requires a fixed submission schema.
 
-Generate independent values for `PAYOUT_ENCRYPTION_KEY` and
-`PAYOUT_FINGERPRINT_KEY`. Each must be an unpadded base64url encoding of at
-least 32 random bytes; the encryption key must be exactly 32 bytes.
+Use the verified `five.nexttask.team` Resend domain and configure a monitored
+support mailbox. Register this webhook endpoint:
 
-Example key generator:
+```text
+https://five-production-relay.xingpicture.workers.dev/webhooks/resend
+```
+
+Subscribe to `email.delivered`, `email.delivery_delayed`, `email.bounced`,
+`email.failed`, and `email.suppressed`. FIVE verifies the raw Svix signature,
+deduplicates events, and stores no recipient address from provider webhooks.
+
+## 4. Configure hosted values
+
+Generate independent, unpadded base64url 32-byte encryption and fingerprint
+keys. Never reuse them.
 
 ```bash
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Configure these hosted runtime values through Sites:
+Configure these through Sites, never in Git:
 
 ```text
+FIVE_MODE=sandbox
+REWARD_PROVIDER=tremendous
+TREMENDOUS_MODE=sandbox
 PAYOUT_ENCRYPTION_KEY
 PAYOUT_FINGERPRINT_KEY
 PROCESSOR_SECRET
 TASK_ADMIN_SECRET
 OPENAI_API_KEY
 OPENAI_MODEL=gpt-5.4-mini
-PAYPAL_CLIENT_ID
-PAYPAL_CLIENT_SECRET
-PAYPAL_WEBHOOK_ID
+TREMENDOUS_API_KEY
+TREMENDOUS_CAMPAIGN_ID
+TREMENDOUS_FUNDING_SOURCE_ID
 RESEND_API_KEY
 RESEND_WEBHOOK_SECRET
-NOTIFICATION_FROM_EMAIL=Five <payouts@your-verified-domain.example>
-SUPPORT_EMAIL=support@your-domain.example
-SPONSOR_ALLOWED_EMAILS=approved-sponsor@your-domain.example
-SPONSOR_SITE_ORIGIN=https://your-canonical-site.example
+NOTIFICATION_FROM_EMAIL=Five <rewards@five.nexttask.team>
+SUPPORT_EMAIL=<monitored mailbox>
 ```
 
-`SPONSOR_ALLOWED_EMAILS` is a comma-separated private-beta allowlist. If it is
-empty, new browser Checkout orders are disabled while claimant payouts and the
-operator-funded task path continue to work. Keep the public sponsor path
-allowlisted until an appropriate data-loss-prevention review is in place.
-`SPONSOR_SITE_ORIGIN` pins PayPal return and cancel URLs to the canonical HTTPS
-deployment instead of deriving a money-flow redirect from the incoming host.
+Leave all provider base-URL overrides empty in production. They work only with
+`PROVIDER_TEST_MODE=loopback` and a loopback host.
 
-Leave the optional provider base-URL overrides unset in production. They are
-accepted only with `PROVIDER_TEST_MODE=loopback`, and even then may target only
-`localhost`, `127.0.0.1`, or `::1` for local integration testing.
+## 5. Apply the D1 migrations
 
-## 4. Apply and verify the D1 migrations
+Back up the target database and apply every migration in `drizzle/` in order.
+Verify `gift_card_rewards` exists with unique order and reward indexes and a
+foreign key to `funded_tasks`. Keep the previous sandbox deployment as the
+rollback path. Never hand-edit a reward row to force progress.
 
-Back up the target D1 database, apply every checked-in migration in order, and
-confirm that `funded_tasks.funding_receipt_id`,
-`funding_receipts.net_cents`, and the sponsor attestation/funding columns are
-`NOT NULL`. Do not set `FIVE_MODE=live` if a
-migration fails. Keep the prior sandbox version available as the rollback path;
-never hand-edit a live money row to force a migration through.
+## 6. Keep the private relay healthy
 
-## 5. Add a recovery scheduler
+The claimant app remains owner-only during the canary. The checked-in Worker at
+`five-production-relay.xingpicture.workers.dev` forwards the raw Resend webhook
+through the Sites access boundary and calls the private recovery drain once per
+minute.
 
-The Worker exports a scheduled handler, but the hosting control plane must still
-attach a cron trigger. Until that trigger is configured, use an external
-scheduler to call this endpoint at least once per minute:
+Its secrets are:
 
 ```text
-POST /api/internal/jobs/drain
-Authorization: Bearer <PROCESSOR_SECRET>
-Content-Type: application/json
-
-{"limit":1}
+SITES_BYPASS_TOKEN=<current private-site bypass token>
+PROCESSOR_SECRET=<same value as the FIVE site>
 ```
 
-The endpoint drains sponsor order/capture reconciliation, agent jobs, and
-notification outbox rows. All use leases and backoff. PayPal identifiers derive
-from durable draft/job IDs, and notification requests use stable idempotency
-keys.
+The processor drains agent jobs and notification rows with leases and bounded
+retries. Sponsor PayPal capture reconciliation is skipped when the active
+reward provider is Tremendous.
 
-## 6. Add funded inventory
+## 7. Create one test inventory item
 
-Preferred path: sign in at `/sponsor`, submit an approved dataset-summary task,
-complete the PayPal approval, and keep or revisit the returned status URL. FIVE
-stores the order before redirecting, captures server-side, recovers through
-authenticated PayPal state even if the browser closes, and creates inventory
-only after the exact capture contract is verified. The status page shows the
-receipt and later the accepted AI result without exposing claimant identity or
-payout data.
-
-The operator endpoint remains an audited fallback for an already-created
-capture. After sponsor funds are present, submit the approved task:
+The operator endpoint first asks Tremendous to create the reward, verifies the
+returned exact `$5.00 USD` executed order, and only then inserts the task:
 
 ```text
 POST /api/internal/tasks
@@ -164,9 +134,8 @@ Content-Type: application/json
   "title": "Summarize supplied product feedback",
   "instructions": "Using only the supplied rows, produce a concise theme summary and list the supporting row identifiers.",
   "input": {"rows":[{"id":"r1","feedback":"The setup was fast."}]},
-  "rewardCents": 700,
-  "sponsorReference": "sponsor:feedback:001",
-  "fundingCaptureId": "PAYPALCAPTUREID",
+  "rewardCents": 500,
+  "sponsorReference": "sponsor:gift:001",
   "automationAllowed": true,
   "autoAccept": true,
   "acceptance": {"requiredEvidenceIds":["r1"],"minEvidenceCount":1},
@@ -174,64 +143,48 @@ Content-Type: application/json
 }
 ```
 
-Sponsor task content is treated as untrusted data. The OpenAI adapter has no
-tools, cannot contact anyone, and must return the fixed submission schema.
-Caller-provided booleans never establish funding; only the PayPal capture read
-does.
+`sponsorReference` is the stable provider `external_id`, so a retry cannot buy a
+second reward. The database stores the order ID and reward ID, never the
+redemption link.
 
-## 7. Activate live mode last
+## 8. Run the sandbox and production canaries
 
-Set both values only after every previous step is verified:
+In Test Flight, verify:
+
+- a duplicate operator request returns the same task/reward binding;
+- the user must sign in and can submit only a valid delivery email;
+- one identity and one email fingerprint cannot claim twice;
+- the agent uses only approved input and the acceptance contract is enforced;
+- link generation happens only while sending the notification;
+- a Resend `delivered` event changes the job, reward, and delivery ledger to
+  their terminal success states exactly once;
+- bounced, failed, and suppressed events move the job to `needs_action`;
+- logs and D1 contain no raw redemption link or provider secret.
+
+Repeat the same checks with one low-risk `$5` production reward while the site
+is still private. Confirm the card can actually be redeemed in the intended
+country. Mail-server acceptance proves delivery of the email, not redemption by
+the person, so support and reissue policy must be explicit.
+
+## 9. Activate live mode last
+
+Only after provider approval, funding, truthful account verification, legal/tax
+review, fraud controls, database migration, and a successful production canary:
 
 ```text
 FIVE_MODE=live
-PAYPAL_MODE=live
+REWARD_PROVIDER=tremendous
+TREMENDOUS_MODE=live
 ```
 
-In live mode the user still enters only a PayPal destination and clicks
-**Get me $5**. Sites-provided ChatGPT identity owns the request, the raw payout
-destination is encrypted, and only a masked hint returns to the browser.
+Live runtime rejects non-production Tremendous keys. Before broadening access,
+confirm the hosting edge owns the authenticated-user header and add suitable
+rate limits/Sybil controls. The database uniqueness rules are a backstop, not
+identity proof.
 
-Before enabling public access, verify that the hosting edge—not client traffic—
-owns and strips/reinjects `oai-authenticated-user-email`. Add rate limits and
-fraud/Sybil controls appropriate to a one-reward-per-person beta; the database's
-one-owner and one-destination constraints are a backstop, not identity proof.
+## PayPal adapter status
 
-## 8. Verify before public access
-
-- Confirm an unauthenticated request is rejected.
-- Create one sponsor order, reload/retry it, and confirm the same draft, stored
-  PayPal order, and provider idempotency keys are reused.
-- Approve the sponsor order and confirm its `custom_id`, `$8.00 USD` gross
-  amount, and at least `$6.00 USD` net amount before inventory appears.
-- Close the browser after approval and confirm the scheduled reconciler captures
-  that same stored order without a second charge or second task.
-- Confirm the sponsor sees the accepted result but no claimant identity, payout
-  destination, fingerprint, or provider payout IDs.
-- Confirm one verified owner and one payout fingerprint cannot claim twice.
-- Run one low-risk funded task end to end.
-- Confirm the job stops at `payout_pending` after PayPal accepts the batch.
-- Confirm only a verified `PAYMENT.PAYOUTS-ITEM.SUCCEEDED` event changes it to
-  `paid`.
-- Replay the same webhook and confirm it is deduplicated.
-- Send an older `HELD` event after `SUCCEEDED` and confirm it cannot downgrade
-  the job.
-- Send a later `RETURNED` or `REFUNDED` event and confirm it becomes `reversed`.
-- Test `UNCLAIMED`, `FAILED`, provider timeout, and expired-lease recovery paths.
-- Confirm the Resend arrival email is delivered once, its outbox row is marked
-  `sent`, `delivery_status` is `delivered`, and `delivered_at` is populated;
-  PayPal's own notification is supplemental.
-- Run the canary certificate and require every gate to be `true`:
-
-  ```bash
-  PROCESSOR_SECRET=<hosted-secret> npm run verify:live-canary -- \
-    https://<site-host> <live-job-uuid> --wait=300
-  ```
-
-  A passing `five-live-canary-v2` certificate proves the exact reward, settled
-  sponsor capture, accepted AI work, individual PayPal item success, recipient
-  mail-server acceptance of the arrival email, and absence of terminal funding
-  or notification-delivery events. It contains no owner, destination, or
-  provider transaction identifiers.
-- Review logs to ensure they contain no raw payout destination or provider
-  secret.
+The prior PayPal Checkout/Payouts implementation remains covered by regression
+tests but is inactive in the gift-card product. It can be selected only with a
+fully approved PayPal business setup and `REWARD_PROVIDER=paypal`; it is not a
+fallback when Tremendous production approval is absent.

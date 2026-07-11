@@ -11,7 +11,10 @@ const DELIVERY_EVENT_STATUSES = {
 export type ResendDeliveryStatus =
   (typeof DELIVERY_EVENT_STATUSES)[keyof typeof DELIVERY_EVENT_STATUSES];
 
-export type ResendNotificationKind = "payout_arrived" | "payout_reversed";
+export type ResendNotificationKind =
+  | "payout_arrived"
+  | "payout_reversed"
+  | "gift_card_ready";
 
 export type VerifiedResendDeliveryEvent = {
   eventId: string;
@@ -76,7 +79,11 @@ export function verifyResendWebhook(
   const data = record(payload.data);
   const tags = record(data?.tags);
   const category = tags?.category;
-  if (category !== "payout_arrived" && category !== "payout_reversed") {
+  if (
+    category !== "payout_arrived" &&
+    category !== "payout_reversed" &&
+    category !== "gift_card_ready"
+  ) {
     return null;
   }
   const providerMessageId = safeProviderIdentifier(

@@ -2,16 +2,16 @@ import { applyResendDeliveryEvent } from "../../../../lib/live-jobs";
 import { verifyResendWebhook } from "../../../../lib/resend-webhooks";
 import {
   getRuntimeEnv,
-  requireLiveEnv,
+  requireActiveLiveEnv,
 } from "../../../../lib/runtime-env";
 
 const JSON_HEADERS = { "Cache-Control": "no-store" };
 const MAX_WEBHOOK_BYTES = 64 * 1024;
 
 export async function POST(request: Request) {
-  let runtime: ReturnType<typeof requireLiveEnv>;
+  let runtime: ReturnType<typeof requireActiveLiveEnv>;
   try {
-    runtime = requireLiveEnv(getRuntimeEnv());
+    runtime = requireActiveLiveEnv(getRuntimeEnv());
   } catch {
     return Response.json(
       { error: "Resend webhook processing is unavailable." },

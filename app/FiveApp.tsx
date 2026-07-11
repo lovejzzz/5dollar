@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 
-type PayoutMethod = "paypal" | "zelle" | "cashapp" | "venmo" | "other";
+type PayoutMethod = "gift_card" | "paypal" | "zelle" | "cashapp" | "venmo" | "other";
 type JobStatus =
   | "received"
   | "matching"
@@ -46,20 +46,16 @@ type AppConfig = {
   mode: "loading" | "sandbox" | "live";
   liveReady: boolean;
   availableFundedTasks: number;
+  rewardProvider: "tremendous" | "paypal";
 };
 
 function validateDestination(value: string) {
   const destination = value.trim();
-  if (!destination) return "Enter a payout destination.";
-  if (destination.length > 120) return "That payout destination is too long.";
+  if (!destination) return "Enter a delivery email.";
+  if (destination.length > 120) return "That email address is too long.";
 
   const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const phoneSyntax = /^\+?[0-9\s().-]+$/;
-  const phoneDigits = destination.replace(/\D/g, "").length;
-  const phone = phoneSyntax.test(destination) && phoneDigits >= 7 && phoneDigits <= 15;
-  const paypalId = /^[2-9A-HJ-NP-Z]{13}$/.test(destination);
-  const valid = email.test(destination) || phone || paypalId;
-  return valid ? "" : "Check that destination and try again.";
+  return email.test(destination) ? "" : "Enter a valid email address.";
 }
 
 function AgentCard({ config }: { config: AppConfig }) {
@@ -127,7 +123,7 @@ function AgentCard({ config }: { config: AppConfig }) {
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ payoutMethod: "paypal", destination }),
+        body: JSON.stringify({ payoutMethod: "gift_card", destination }),
       });
       const payload = (await response.json()) as {
         job?: PublicJob;
@@ -173,7 +169,7 @@ function AgentCard({ config }: { config: AppConfig }) {
         <div className="card-status-row">
           <span className={`agent-state ${complete ? "agent-state--done" : ""}`}>
             <span className="agent-state__dot" aria-hidden="true" />
-            {complete ? (live ? "PAYOUT CONFIRMED" : "DEMO FINISHED") : needsAction ? "ACTION NEEDED" : "AGENT RUNNING"}
+            {complete ? (live ? "GIFT CARD DELIVERED" : "DEMO FINISHED") : needsAction ? "ACTION NEEDED" : "AGENT RUNNING"}
           </span>
           <span className="request-code">{job.requestCode}</span>
         </div>
@@ -229,7 +225,9 @@ function AgentCard({ config }: { config: AppConfig }) {
           <span className="demo-disclosure__label">
             {live
               ? complete
-                ? "PAYPAL CONFIRMED"
+                ? job.payoutMethod === "gift_card"
+                  ? "EMAIL DELIVERED"
+                  : "PAYPAL CONFIRMED"
                 : needsAction
                   ? "ACTION NEEDED"
                   : "LIVE WORKFLOW"
@@ -240,11 +238,13 @@ function AgentCard({ config }: { config: AppConfig }) {
           <p>
             {live
               ? complete
-                ? "The individual payout item—not just its batch—was reported successful by PayPal."
-                : "Live rewards use pre-funded tasks. A payout cannot start until accepted revenue covers the full $5."
+                ? job.payoutMethod === "gift_card"
+                  ? "The mail server accepted the email containing a fresh provider-hosted redemption link."
+                  : "The individual payout item—not just its batch—was reported successful by PayPal."
+                : "Live rewards use pre-funded tasks and pre-issued gift cards. Delivery starts only after the work is accepted."
               : complete
-                ? "This preview stored only a masked destination and simulated the workflow."
-                : "These steps are simulated. No marketplace task or payout is being created."}
+                ? "This preview stored only a masked email and simulated the workflow."
+                : "These steps are simulated. No marketplace task or gift card is being created."}
           </p>
         </div>
 
@@ -265,7 +265,7 @@ function AgentCard({ config }: { config: AppConfig }) {
   return (
     <section className="request-card" aria-labelledby="request-heading">
       <div className="card-status-row">
-        <span className="mono-label">YOUR PAYOUT</span>
+        <span className="mono-label">YOUR GIFT CARD</span>
         <span className="fixed-pill">FIXED AMOUNT</span>
       </div>
       <h2 id="request-heading" className="amount-lockup" aria-label="Five U.S. dollars">
@@ -275,13 +275,13 @@ function AgentCard({ config }: { config: AppConfig }) {
       </h2>
 
       <form onSubmit={handleSubmit} noValidate>
-        <div className="payout-rail" aria-label="Payout method: PayPal">
-          <span>PAYPAL</span>
-          <strong>First live payout rail</strong>
+        <div className="payout-rail" aria-label="Reward method: digital gift card">
+          <span>DIGITAL GIFT CARD</span>
+          <strong>Delivered by email</strong>
         </div>
 
         <div className="field-group">
-          <label htmlFor="payout-destination">Where should we send it?</label>
+          <label htmlFor="payout-destination">Email for delivery</label>
           <input
             id="payout-destination"
             name="payout-destination"
@@ -292,8 +292,8 @@ function AgentCard({ config }: { config: AppConfig }) {
               if (signInUrl) setSignInUrl("");
             }}
             onBlur={() => destination && setError(validateDestination(destination))}
-            placeholder="Email, phone, or PayPal ID"
-            autoComplete="off"
+            placeholder="you@example.com"
+            autoComplete="email"
             spellCheck={false}
             aria-invalid={Boolean(error)}
             aria-describedby={error ? "destination-error" : "destination-help"}
@@ -313,8 +313,8 @@ function AgentCard({ config }: { config: AppConfig }) {
           ) : (
             <p className="field-help" id="destination-help">
               {config.mode === "live"
-                ? "Use the email, phone number, or PayPal ID that should receive the live payout."
-                : "PayPal is the first live payout rail. This sandbox does not send money."}
+                ? "We send a fresh provider-hosted redemption link to this address after the task is accepted."
+                : "This sandbox shows the full flow but does not issue or send a real gift card."}
             </p>
           )}
         </div>
@@ -332,7 +332,7 @@ function AgentCard({ config }: { config: AppConfig }) {
                 ? "No funded tasks available"
                 : liveSetupPaused
                   ? "Live requests paused"
-                  : "Get me $5"}
+                  : "Get me a $5 gift card"}
           </span>
           <span aria-hidden="true">→</span>
         </button>
@@ -345,7 +345,7 @@ function AgentCard({ config }: { config: AppConfig }) {
 
       <p className="card-assurance">
         <span className="assurance-mark" aria-hidden="true">✓</span>
-        No password. No card. No upfront payment. Live arrival email is automatic.
+        No password. No card. No upfront payment. Delivery status stays visible.
       </p>
     </section>
   );
@@ -356,6 +356,7 @@ export function FiveApp() {
     mode: "loading",
     liveReady: false,
     availableFundedTasks: 0,
+    rewardProvider: "tremendous",
   });
 
   useEffect(() => {
@@ -371,6 +372,7 @@ export function FiveApp() {
               typeof payload.availableFundedTasks === "number"
                 ? payload.availableFundedTasks
                 : 0,
+            rewardProvider: payload.rewardProvider === "paypal" ? "paypal" : "tremendous",
           });
         }
       })
@@ -380,6 +382,7 @@ export function FiveApp() {
             mode: "sandbox",
             liveReady: false,
             availableFundedTasks: 0,
+            rewardProvider: "tremendous",
           });
         }
       });
@@ -408,7 +411,7 @@ export function FiveApp() {
             ? config.liveReady
               ? `${config.availableFundedTasks} funded task${config.availableFundedTasks === 1 ? "" : "s"} currently available. Payment is confirmed only after provider success.`
               : "Live requests are disabled until every earning and payout secret is configured."
-            : "This demo simulates the workflow. No real money is earned or sent."}
+            : "This demo simulates the workflow. No real task or gift card is created."}
       </div>
 
       <header className="site-header">
@@ -428,12 +431,12 @@ export function FiveApp() {
           <div className="hero-copy">
             <p className="eyebrow">AUTONOMOUS MICRO-EARNING AGENT</p>
             <h1 id="hero-heading">
-              Your next $5,
+              Your next $5 gift card,
               <span>handled.</span>
             </h1>
             <p className="hero-lede">
-              Tell Five where to send it. The agent matches approved, funded work,
-              completes the task, and tracks the reward from start to finish.
+              Give Five an email. The agent matches approved, pre-funded work,
+              completes the task, and delivers a $5 digital gift card.
             </p>
             <div className="proof-row" aria-label="Product promises">
               <span><i aria-hidden="true" />No card needed</span>
@@ -442,8 +445,8 @@ export function FiveApp() {
             </div>
             <p className="hero-qualifier">
               {live
-                ? "Live rewards depend on funded task inventory and verified PayPal item status."
-                : "Prototype experience. Live earning and payout providers are not connected yet."}
+                ? "Live requests depend on pre-funded task inventory and verified gift-card delivery."
+                : "Prototype experience. The gift-card provider is not connected to production yet."}
             </p>
             <div className="five-watermark" aria-hidden="true">$5</div>
           </div>
@@ -456,8 +459,8 @@ export function FiveApp() {
           <div className="step-grid">
             <article>
               <span className="step-number">01</span>
-              <h3>Choose where</h3>
-              <p>Enter the PayPal email, phone number, or ID that should receive the $5.</p>
+              <h3>Give us an email</h3>
+              <p>Enter the address that should receive the $5 digital gift card.</p>
             </article>
             <article>
               <span className="step-number">02</span>
@@ -466,8 +469,8 @@ export function FiveApp() {
             </article>
             <article>
               <span className="step-number">03</span>
-              <h3>You get paid</h3>
-              <p>Only after revenue settles, Five releases $5 and records the provider receipt.</p>
+              <h3>Redeem your $5</h3>
+              <p>After the work is accepted, Five emails a fresh provider-hosted redemption link.</p>
             </article>
           </div>
         </section>
@@ -488,14 +491,14 @@ export function FiveApp() {
               </li>
               <li>
                 <span aria-hidden="true">03</span>
-                <div><strong>A visible receipt</strong><p>Every job state and real provider update must be logged.</p></div>
+                <div><strong>A visible receipt</strong><p>Every job state and real delivery update must be logged.</p></div>
               </li>
             </ul>
           </div>
 
           <aside
             className="receipt"
-            aria-label={live ? "Live payout contract" : "Simulated agent receipt"}
+            aria-label={live ? "Live gift-card contract" : "Simulated agent receipt"}
           >
             <div className="receipt__top">
               <span>AGENT RECEIPT</span>
@@ -505,8 +508,8 @@ export function FiveApp() {
             <dl>
               <div><dt>Opportunity</dt><dd>Approved sponsor task</dd></div>
               <div><dt>Agent work</dt><dd>Completed + checked</dd></div>
-              <div><dt>Revenue</dt><dd>Must be settled</dd></div>
-              <div><dt>Payout</dt><dd>Provider receipt required</dd></div>
+              <div><dt>Reward</dt><dd>Pre-issued at $5</dd></div>
+              <div><dt>Delivery</dt><dd>Email receipt required</dd></div>
             </dl>
             <div className="receipt__footer">
               <span>{live ? "FIVE / LIVE BETA" : "FIVE / DEMO"}</span>
@@ -525,23 +528,23 @@ export function FiveApp() {
               <summary>Where does the $5 come from?</summary>
               <p>
                 {live
-                  ? "Sponsors fund approved tasks through verified PayPal captures. The agent completes one and releases $5 only after its evidence contract accepts the work."
-                  : "In a live version, sponsors pre-fund approved tasks. The agent completes one, quality-checks it, and shares $5 only after that revenue is accepted and settled."}
+                  ? "Each approved task is paired with a pre-issued $5 gift card. The agent completes one and releases its redemption link only after the evidence contract accepts the work."
+                  : "In a live version, each approved task is paired with a pre-issued $5 gift card. The agent completes one, quality-checks it, and releases the link only after acceptance."}
               </p>
             </details>
             <details>
               <summary>Is the $5 guaranteed?</summary>
               <p>
                 Not unless a funded reward is already reserved. A real product must show inventory,
-                eligibility, and timing before accepting a request.
+                eligibility, and timing before accepting a request. Some card choices may also be limited by country.
               </p>
             </details>
             <details>
               <summary>What data does Five store?</summary>
               <p>
                 {live
-                  ? "Live requests store the authenticated owner email, an encrypted payout destination, a keyed fingerprint, a masked hint, workflow/provider receipts, and notification delivery state. The raw destination is never returned to the browser."
-                  : "The demo saves a one-way hash and a masked hint—not the raw destination—plus the workflow status needed to keep the activity log consistent."}
+                  ? "Live requests store the authenticated owner email, an encrypted delivery email, a keyed fingerprint, a masked hint, provider IDs, and notification state. Redemption links are generated only when an email is sent and are never stored by Five."
+                  : "The demo saves a one-way hash and a masked email—not the raw address—plus the workflow status needed to keep the activity log consistent."}
               </p>
             </details>
           </div>

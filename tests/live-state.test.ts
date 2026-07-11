@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyResendDeliveryEvent,
   applyPayPalWebhook,
   applyPayPalPayoutWebhook,
   applyPayPalPayoutObservation,
@@ -9,10 +10,12 @@ import {
   createLiveJob,
   getOrCreatePayout,
   markEarningAccepted,
+  markGiftCardDeliveryPending,
   markLiveJobRetry,
   markPayoutPending,
   taskForLiveJob,
 } from "../lib/live-jobs";
+import { createGiftCardFundedTask } from "../lib/gift-card-tasks";
 import { createPayPalPayoutIdempotency } from "../lib/payouts/paypal";
 import { processLiveJob } from "../lib/process-live-job";
 import { isSponsorAllowed, type RuntimeEnv } from "../lib/runtime-env";
@@ -424,6 +427,186 @@ test("funding reversal halts an unpaid job without deleting the accepted result"
       "funding_reversed",
     );
     assert.equal(await claimLiveJob(created.id, runtime), null);
+  } finally {
+    database.close();
+  }
+});
+
+test("a pre-issued $5 gift card is delivered once without storing its redemption link", async () => {
+  const database = new FakeD1Database();
+  const runtime: RuntimeEnv = { DB: database.asBinding(), ...runtimeKeys };
+  const giftSpec = {
+    taskType: "dataset_summary" as const,
+    title: "Summarize a supplied product feedback dataset",
+    instructions:
+      "Using only the supplied feedback rows, produce a concise theme summary and list the supporting row identifiers.",
+    input: { rows: [{ id: "gift-r1", feedback: "The setup was fast." }] },
+    rewardCents: 500 as const,
+    sponsorReference: "sponsor:gift:state:001",
+    automationAllowed: true as const,
+    autoAccept: true as const,
+    acceptance: { requiredEvidenceIds: ["gift-r1"] },
+    minAnswerChars: 80,
+  };
+  try {
+    const task = await createGiftCardFundedTask(
+      giftSpec,
+      {
+        provider: "tremendous",
+        orderStatus: "EXECUTED",
+        externalId: giftSpec.sponsorReference,
+        orderTotalCents: 500,
+        id: "REWARD-GIFT-STATE-001",
+        orderId: "ORDER-GIFT-STATE-001",
+        valueCents: 500,
+        currency: "USD",
+        deliveryMethod: "LINK",
+        deliveryStatus: "SUCCEEDED",
+      },
+      runtime,
+    );
+    const replay = await createGiftCardFundedTask(
+      giftSpec,
+      {
+        provider: "tremendous",
+        orderStatus: "EXECUTED",
+        externalId: giftSpec.sponsorReference,
+        orderTotalCents: 500,
+        id: "REWARD-GIFT-STATE-001",
+        orderId: "ORDER-GIFT-STATE-001",
+        valueCents: 500,
+        currency: "USD",
+        deliveryMethod: "LINK",
+        deliveryStatus: "SUCCEEDED",
+      },
+      runtime,
+    );
+    assert.equal(replay.id, task.id);
+    assert.equal(replay.duplicate, true);
+
+    const created = await createLiveJob({
+      ownerEmail: "gift-owner@example.com",
+      payoutMethod: "gift_card",
+      destination: "gift-recipient@example.com",
+      runtime,
+    });
+    const earningClaim = await claimLiveJob(created.id, runtime);
+    assert.ok(earningClaim);
+    const reservedTask = await taskForLiveJob(earningClaim, runtime);
+    assert.ok(reservedTask);
+    assert.equal(
+      await markEarningAccepted({
+        job: earningClaim,
+        task: reservedTask,
+        submission: {
+          answer:
+            "The supplied feedback indicates that the customer valued the fast setup experience, based only on gift-r1.",
+          evidence: ["gift-r1: The setup was fast."],
+          qualityNotes: ["Limited to one supplied row."],
+        },
+        answerLength: 110,
+        acceptancePassed: true,
+        responseId: "resp-gift-state-001",
+        model: "gpt-test",
+        runtime,
+      }),
+      true,
+    );
+
+    const deliveryClaim = await claimLiveJob(created.id, runtime);
+    assert.ok(deliveryClaim);
+    assert.equal(deliveryClaim.status, "payout_submitting");
+    assert.equal(
+      await markGiftCardDeliveryPending({ job: deliveryClaim, runtime }),
+      true,
+    );
+
+    const giftLiveRuntime: RuntimeEnv = {
+      ...runtime,
+      FIVE_MODE: "live",
+      REWARD_PROVIDER: "tremendous",
+      TREMENDOUS_MODE: "live",
+      PROCESSOR_SECRET: "processor-secret",
+      TASK_ADMIN_SECRET: "task-secret",
+      OPENAI_API_KEY: "openai-key",
+      TREMENDOUS_API_KEY: "PROD_state-test",
+      TREMENDOUS_CAMPAIGN_ID: "campaign-state-test",
+      RESEND_API_KEY: "resend-key",
+      RESEND_WEBHOOK_SECRET: "whsec-resend-state-test",
+      NOTIFICATION_FROM_EMAIL: "Five <rewards@example.com>",
+      SUPPORT_EMAIL: "support@example.com",
+    };
+    let sentTo = "";
+    let sentLink = "";
+    const notificationResult = await processNotification({
+      runtime: giftLiveRuntime,
+      dependencies: {
+        generateRewardLink: async (input) => {
+          assert.equal(input.rewardId, "REWARD-GIFT-STATE-001");
+          return {
+            provider: "tremendous" as const,
+            rewardId: input.rewardId,
+            link: "https://testflight.tremendous.com/rewards/payout/just-in-time-link",
+          };
+        },
+        send: async (input) => {
+          sentTo = input.to;
+          sentLink = input.redemptionLink ?? "";
+          return { provider: "resend" as const, messageId: "email-gift-state-001" };
+        },
+      },
+    });
+    assert.equal(notificationResult.status, "sent");
+    assert.equal(sentTo, "gift-recipient@example.com");
+    assert.notEqual(sentTo, "gift-owner@example.com");
+    assert.equal(
+      sentLink,
+      "https://testflight.tremendous.com/rewards/payout/just-in-time-link",
+    );
+    const deliveredAt = Date.parse("2026-07-10T15:00:00Z");
+    const delivered = await applyResendDeliveryEvent(
+      {
+        eventId: "resend-gift-delivered-001",
+        eventType: "email.delivered",
+        deliveryStatus: "delivered",
+        notificationKind: "gift_card_ready",
+        providerMessageId: "email-gift-state-001",
+        providerEventTime: deliveredAt,
+      },
+      giftLiveRuntime,
+    );
+    assert.equal(delivered.pendingNotification, false);
+    assert.equal(
+      database.query<{ status: string }>("SELECT status FROM live_jobs")[0].status,
+      "paid",
+    );
+    assert.equal(
+      database.query<{ status: string }>("SELECT status FROM gift_card_rewards")[0].status,
+      "DELIVERED",
+    );
+    assert.equal(
+      database.query<{ status: string }>("SELECT status FROM payouts")[0].status,
+      "DELIVERED",
+    );
+    const durableRewardState = JSON.stringify({
+      rewards: database.query("SELECT * FROM gift_card_rewards"),
+      payouts: database.query("SELECT * FROM payouts"),
+      notifications: database.query("SELECT * FROM notification_outbox"),
+    });
+    assert.ok(!durableRewardState.includes("tremendous.com/rewards/"));
+
+    const duplicateDelivery = await applyResendDeliveryEvent(
+      {
+        eventId: "resend-gift-delivered-001",
+        eventType: "email.delivered",
+        deliveryStatus: "delivered",
+        notificationKind: "gift_card_ready",
+        providerMessageId: "email-gift-state-001",
+        providerEventTime: deliveredAt,
+      },
+      giftLiveRuntime,
+    );
+    assert.equal(duplicateDelivery.duplicate, true);
   } finally {
     database.close();
   }

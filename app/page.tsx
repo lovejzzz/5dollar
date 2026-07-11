@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { FiveApp } from "./FiveApp";
 
 export const metadata: Metadata = {
-  title: "FIVE — Your next $5, handled",
+  title: "FIVE — Your next $5 gift card, handled",
   description:
-    "Choose a payout destination and preview how a transparent micro-earning agent would work.",
+    "Enter an email and preview how a transparent agent can earn and deliver a $5 digital gift card.",
 };
 
 export default function Home() {

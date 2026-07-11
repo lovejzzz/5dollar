@@ -657,8 +657,37 @@ test("arrival email is transactional and idempotent", async () => {
   assert.match(String(requestBody?.subject), /\$5 has arrived/);
 });
 
+test("gift-card email carries the just-in-time Tremendous link and no provider ledger ID", async () => {
+  let requestBody: Record<string, unknown> = {};
+  const result = await sendPayoutArrivalNotification({
+    apiKey: "resend-key",
+    from: "Five <rewards@example.com>",
+    to: "owner@example.com",
+    requestCode: "FIVE-GIFT01",
+    payoutReference: "REWARD-LEDGER-ONLY",
+    idempotencyKey: "job:gift:ready",
+    kind: "gift_card_ready",
+    redemptionLink:
+      "https://testflight.tremendous.com/rewards/payout/private-link-token",
+    baseUrl: "https://notify.test",
+    fetcher: async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ id: "email-gift-001" });
+    },
+  });
+  assert.equal(result.messageId, "email-gift-001");
+  assert.match(String(requestBody.subject), /gift card is ready/i);
+  assert.match(String(requestBody.text), /testflight\.tremendous\.com\/rewards\/payout/);
+  assert.doesNotMatch(String(requestBody.text), /REWARD-LEDGER-ONLY/);
+  assert.deepEqual(requestBody.tags, [
+    { name: "category", value: "gift_card_ready" },
+  ]);
+});
+
 test("Resend delivery webhooks are raw-body verified and privacy minimized", () => {
-  const secret = "whsec_dGVzdC1yZXNlbmQtd2ViaG9vay1rZXk=";
+  const secret = `whsec_${Buffer.from(
+    "five-resend-webhook-test-secret",
+  ).toString("base64")}`;
   const eventId = "msg_resend_delivery_001";
   const now = new Date();
   const rawPayload = JSON.stringify({

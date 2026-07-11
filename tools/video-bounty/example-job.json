@@ -1,0 +1,21 @@
+{
+  "taskId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "title": "Example funded video bounty",
+  "expectedNetRewardUsd": 7.4,
+  "minimumProfitAfterGenerationUsd": 5,
+  "maximumGenerationCostUsd": 0.8,
+  "provider": "ltx",
+  "model": "ltx-2-3-pro",
+  "duration": 10,
+  "resolution": "1920x1080",
+  "fps": 24,
+  "generateAudio": true,
+  "posterTimeSeconds": 7.5,
+  "credit": "Built for Taskmarket",
+  "prompt": "A single continuous cinematic shot begins in darkness and moves chronologically into warm sunrise. The subject and environment move genuinely throughout the clip while a stabilized camera tracks in one unbroken arc. Realistic materials, restrained lighting, precise spatial relationships, and a final composition designed as a poster frame. Synchronized ambient sound grows from a quiet low hum into a warm harmonic bloom. No narration, no logos, no text, no slideshow, and no static pan.",
+  "soundVibe": "quiet electrical ambience opening into a warm harmonic bloom",
+  "disclosure": "Generated with LTX-2.3 from an original production prompt prepared by FIVE; no human-recorded footage was used.",
+  "researchSources": [
+    "https://example.com/source"
+  ]
+}

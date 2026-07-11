@@ -1,40 +1,39 @@
 # FIVE
 
-FIVE is a working product preview for a simple promise: enter a payout
-destination, click **Get me $5**, and follow an agent from request to payout.
+FIVE is a private product preview for one simple request: enter an email, click
+**Get me a $5 gift card**, and follow an agent from request to delivery.
 
-The default deployment is deliberately a sandbox. It runs the full interface
-and a durable D1-backed activity ledger, masks the payout destination, advances
-the agent workflow, and can send a browser notification.
+The deployed app is deliberately a sandbox. It exercises the interface and a
+durable D1 activity ledger, stores only a masked email and one-way fingerprint,
+and simulates the agent workflow. It does not create a marketplace task, issue
+a gift card, or send money.
 
-The same codebase now also contains a credential-gated live path: authenticated
-ownership, encrypted payout destinations, pre-funded task inventory, structured
-OpenAI task execution, an idempotent processor, PayPal Payouts, verified
-webhooks, item-level reconciliation, and a transactional notification outbox.
-It also includes a separate `/sponsor` Checkout flow that turns one verified
-PayPal order into one immutable dataset-summary task and returns the accepted
-result to its sponsor.
-Live mode refuses to start unless every required earning, payout, encryption,
-and email secret is present. No real provider credentials or sponsor funds are
-included in this repository.
+The codebase also contains a credential-gated live contract:
 
-## Product contract
+1. An operator submits a narrow, automation-approved task.
+2. FIVE creates and verifies one pre-issued `$5.00 USD` Tremendous link reward.
+3. The task enters inventory only after that immutable provider record exists.
+4. An authenticated user requests the reward with a delivery email.
+5. The agent completes the task and a deterministic evidence contract accepts it.
+6. FIVE generates a fresh provider-hosted redemption link just in time and
+   sends it through the transactional email outbox.
+7. The job becomes `paid` only after Resend reports that the recipient mail
+   server accepted that gift-card email.
 
-A live version should be inventory-backed, not magical:
+FIVE never stores the redemption link. Provider order/reward IDs, state
+transitions, and delivery evidence are stored for audit and replay safety.
 
-1. A sponsor defines a bounded task and approves its fixed PayPal Checkout order.
-2. FIVE verifies the immutable reference, exact USD amount, and settled net
-   proceeds before creating task inventory.
-3. The agent rechecks the funds, matches the task, and completes it.
-4. A deterministic evidence contract quality-checks the deliverable and makes
-   the accepted result available to the sponsor.
-5. Exactly $5 is released through a supported payout provider.
-6. The job is marked paid only after the provider confirms the individual
-   payout succeeded.
-7. A durable outbox sends an idempotent arrival email and retries failures.
+## Why gift cards
 
-The agent must never trade, gamble, spam, impersonate someone, require a user
-deposit, or automate work whose terms prohibit automation.
+The claimant needs only an email address; they do not connect a PayPal account
+to FIVE. This does **not** eliminate compliance for the sender. The operator
+still needs a production-approved and funded reward-provider account, truthful
+identity/business information requested by that provider, tax/legal review, and
+fraud controls. The repository cannot guarantee that any particular operator
+will be approved without an SSN.
+
+The hardened PayPal funding and payout adapters remain in the repository as a
+disabled future option. `REWARD_PROVIDER=tremendous` selects the gift-card path.
 
 ## Local development
 
@@ -43,9 +42,8 @@ npm install
 npm run dev
 ```
 
-The local app uses the D1 binding declared in `.openai/hosting.json`. Tables are
-created defensively by the API and are also represented by the checked-in
-Drizzle migration.
+The D1 binding is declared in `.openai/hosting.json`. Runtime tables are created
+defensively and represented by checked-in Drizzle migrations.
 
 ## Verification
 
@@ -54,38 +52,33 @@ npm run lint
 npm test
 ```
 
-The tests cover the UI/product contract, production build, prohibited and
-underfunded task rejection, settled-capture parsing, structured OpenAI requests,
-exact $5 PayPal payout shape, stable payout idempotency, notification delivery,
-PayPal Checkout order/capture recovery, sponsor ownership and sensitive-data
-rejection, and D1 state-machine exercises for replay, lease fencing, stale
-webhooks, reversals, one-time task funding, and one-time notification creation.
+The suite covers the product copy, production build, migrations, forbidden and
+underfunded tasks, structured AI output, Tremendous order/reward/link contracts,
+PayPal adapter regression behavior, encrypted destinations, lease fencing,
+idempotency, webhook replay, gift-card email delivery, and the rule that no
+redemption link is persisted.
 
-After a production canary runs, verify its complete sponsor → AI → individual
-payout → mail-server-delivered arrival-email proof without exposing claimant or
-provider identifiers:
+See [docs/LIVE_RUNBOOK.md](docs/LIVE_RUNBOOK.md) for the external gates and
+activation sequence. Keep `FIVE_MODE=sandbox` until every production gate and a
+real end-to-end canary pass.
 
-```bash
-PROCESSOR_SECRET=<hosted-secret> npm run verify:live-canary -- \
-  https://your-site.example <live-job-uuid> --wait=300
-```
+## Funded video bounties
 
-See [docs/LIVE_RUNBOOK.md](docs/LIVE_RUNBOOK.md) for the external setup required
-to turn on real earning and payouts.
+FIVE also includes a guarded LTX-2.3 production pipeline for legitimate,
+pre-funded video bounties. It estimates generation cost before spending,
+generates synchronized video and audio through the async API, runs deterministic
+motion/audio/format checks, packages a credited poster frame and AI disclosure,
+and can submit exactly once through Taskmarket. See
+[docs/VIDEO_BOUNTY_PIPELINE.md](docs/VIDEO_BOUNTY_PIPELINE.md). The verified
+local backend, separate-workstation choices, benchmark gates, and migration
+sequence are tracked in
+[docs/LOCAL_VIDEO_WORKSTATION_PLAN.md](docs/LOCAL_VIDEO_WORKSTATION_PLAN.md).
 
-## What external production setup still needs
+## Safety contract
 
-- real sponsor funding and lawful, automation-approved dataset-summary tasks;
-- an intentionally small sponsor allowlist and a data-loss-prevention review
-  before opening task submission beyond the private beta;
-- an approved and funded PayPal Business Payouts account;
-- hosted secrets for OpenAI, encryption, PayPal, Resend, the processor, and a
-  monitored sponsor-support mailbox;
-- a configured scheduled trigger (or external scheduler) for the idempotent
-  job and notification drains;
-- operational monitoring and an appeal/support path;
-- terms, tax, sanctions, fraud, privacy, and worker-classification review.
+The agent must never trade, gamble, spam, impersonate someone, require a user
+deposit, make purchases, handle credentials, or automate work whose terms do
+not permit automation. A funded task is not automatically a safe task.
 
-Zelle is preview-only. It should not be offered as a live self-serve rail
-without an approved treasury-bank integration. PayPal is the practical first
-provider for a real MVP, subject to business approval and funding.
+The main app stays private during the first canary. The checked-in relay exposes
+only signature-preserving webhook forwarding and a bounded recovery scheduler.

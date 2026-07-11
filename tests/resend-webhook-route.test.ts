@@ -6,7 +6,9 @@ import { POST } from "../app/api/webhooks/resend/route";
 import type { RuntimeEnv } from "../lib/runtime-env";
 import { FakeD1Database } from "./helpers/fake-d1";
 
-const WEBHOOK_SECRET = "whsec_dGVzdC1yZXNlbmQtd2ViaG9vay1rZXk=";
+const WEBHOOK_SECRET = `whsec_${Buffer.from(
+  "five-resend-webhook-test-secret",
+).toString("base64")}`;
 
 function liveRuntime(database: FakeD1Database): RuntimeEnv {
   return {
